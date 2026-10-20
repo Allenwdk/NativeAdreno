@@ -77,9 +77,11 @@ public:
      * write-combined, so publishForDevice/acquireDeviceWrites have nothing left to do. release() restores the default attribute. */
     IOReturn makeWriteCombined();
     bool writeCombined() const {return write_combined_;}
-    /* NativeAdrenoReassertWriteCombined over this object's pages; nothing for an object that is not write-combined. */
+    /* NativeAdrenoReassertWriteCombined over this object's pages; nothing for an object that is not write-combined, nor for one from the
+     * BO pool: XNU set scattered BOs' pages back to the default attribute (int-160: 123847 pages), never a pool page (int-161: none in
+     * 1280 submissions, while walking the pool's pages took 0.65 ms of each). The submissions' line audit still covers every object. */
     IOReturn reassertWriteCombined(uint32_t *reset) const
-    {return write_combined_ && span_count_?NativeAdrenoReassertWriteCombined(spans_,span_count_,reset):kIOReturnSuccess;}
+    {return write_combined_ && span_count_ && !pooled_?NativeAdrenoReassertWriteCombined(spans_,span_count_,reset):kIOReturnSuccess;}
     bool backed() const {return descriptor_ || imported_ || pooled_;}
     /* Refuses device references/quarantine; only clears ownership after real
      * descriptor complete() succeeds. No automatic reset or resource recycling. */
