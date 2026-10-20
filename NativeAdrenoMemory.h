@@ -60,6 +60,9 @@ public:
      * allocate() uses the pool when one is reserved and has room, else the scattered path. Only the board calls this. */
     static IOReturn reservePool(unsigned output_bits,size_t bytes);
     static size_t poolBytes();
+    /* The whole pool write-combined once, for good: a pooled BO then takes no page-attribute change on allocation or release.
+     * Board only, after reservePool, when user BOs are write-combined. */
+    static IOReturn writeCombinePool();
     /* Pins bytes at address in task (a user task's own pages) instead of allocating; prepare() wires them until release().
      * There is no kernel mapping: the owner keeps its CPU mapping and does its own cache maintenance around GPU use, so
      * publishForDevice/acquireDeviceWrites have nothing to do for this object. Spans and PA bounds are checked as for allocate. */

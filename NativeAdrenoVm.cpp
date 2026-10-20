@@ -61,10 +61,13 @@ ArmSmmu4KStatus NativeAdrenoVm::observe() const
     if(status)return status;
     return ArmSmmu4KObserveStreams(&io_,streams_,context_,&routes);
 }
+/* Global policy, the context image and the owned routes only. The scan of every other slot for a conflicting route read each
+ * SMR/S2CR of the SMMU twice per map and unmap (int-152: 0.75 ms a pass, 1.3 s of the 3.2 s of 807 maps); observe(), which
+ * observeCheap runs every 64 operations, keeps that scan. */
 ArmSmmu4KStatus NativeAdrenoVm::observeStreamsOnly() const
 {
     ArmSmmu4KStreamResult routes;
-    return ArmSmmu4KObserveStreams(&io_,streams_,context_,&routes);
+    return ArmSmmu4KObserveOwnedStreams(&io_,streams_,context_,&routes);
 }
 ArmSmmu4KStatus NativeAdrenoVm::observeCheap()
 {

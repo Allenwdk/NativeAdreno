@@ -12,13 +12,16 @@ static bool outputWidth(unsigned bits)
 enum : IOReturn {kNativeAdrenoProtectionFailure=2};   /* KERN_PROTECTION_FAILURE, as prepare() reports a range that cannot be wired for writing */
 extern "C" {volatile uint32_t native_adreno_pool_mib=0,native_adreno_pool_status=0;volatile uint32_t native_adreno_import_stage;volatile uint64_t native_adreno_import_fail_pa,native_adreno_import_fail_offset;}
 /* The pool (see reservePool): a free list of page extents over one contiguous block; best fit, neighbours merged on release. */
-extern "C" {volatile uint32_t native_adreno_pool_stats[8];}   /* [0] pool MiB, [1] BOs from the pool, [2] fell back, [3] MiB in use, [4] peak MiB, [5] scattered BOs, [6] their spans, [7] import spans */
+extern "C" {volatile uint32_t native_adreno_pool_stats[8];}
+/* The pool's write-combine (writeCombinePool): bit 31 once tried, the low bits its status. */
+extern "C" {volatile uint32_t native_adreno_pool_wc;}   /* [0] pool MiB, [1] BOs from the pool, [2] fell back, [3] MiB in use, [4] peak MiB, [5] scattered BOs, [6] their spans, [7] import spans */
 namespace {
 struct PoolExtent {size_t offset,bytes;};
 struct Pool {
     IOBufferMemoryDescriptor *descriptor=nullptr;
     unsigned char *virt=nullptr;uint64_t physical=0;size_t bytes=0,used=0,peak=0;
     PoolExtent free[512];unsigned count=0;
+    bool write_combined=false;
 } pool;
 bool poolTake(size_t bytes,size_t *offset) {
     int best=-1;
@@ -50,6 +53,21 @@ void poolGive(size_t offset,size_t bytes) {
 }
 }
 size_t NativeAdrenoMemory::poolBytes() {return pool.bytes;}
+/* int-152: a user BO's pages changed attribute one pmap_set_cache_attributes call at a time (each walks the page's mappings, flushes the
+ * TLB and cleans the page), on allocation and again on release, under the connection lock: 3 ms a BO on average and 90-130 ms for a
+ * surface-sized one, while every other GPU call of every client waited. The pool is the BOs' own block and nothing else maps it, so
+ * its pages take the attribute once here and keep it while the pool lives. */
+IOReturn NativeAdrenoMemory::writeCombinePool()
+{
+    if(!pool.descriptor || !pool.virt || !pool.bytes)return kIOReturnNotReady;
+    if(pool.write_combined)return kIOReturnSuccess;
+    IOReturn status=NativeAdrenoMaintainOwnedPages(pool.virt,pool.bytes,NativeAdrenoCleanInvalidate);
+    if(status)return status;
+    const NativeAdrenoPhysicalSpan span={0,pool.physical,pool.bytes};
+    status=NativeAdrenoSetPagesCacheMode(&span,1,true);
+    if(status)return status;
+    pool.write_combined=true;return kIOReturnSuccess;
+}
 IOReturn NativeAdrenoMemory::reservePool(unsigned bits,size_t bytes)
 {
     if(pool.descriptor)return kIOReturnBusy;
@@ -96,7 +114,9 @@ IOReturn NativeAdrenoMemory::allocate(size_t bytes,unsigned bits,bool contiguous
                 span_capacity_=1;span_count_=1;spans_[0]={0,physical,bytes};
                 mapping_=pool.virt+offset;bytes_=bytes;pooled_=true;pool_offset_=offset;prepared_=true;
                 bzero(mapping_,bytes);
-                status=NativeAdrenoMaintainOwnedPages(mapping_,bytes,NativeAdrenoClean);
+                /* Through a write-combined pool's own mapping the zeros go to DRAM; the barrier completes them. */
+                if(pool.write_combined)__asm__ volatile("dsb sy":::"memory");
+                else status=NativeAdrenoMaintainOwnedPages(mapping_,bytes,NativeAdrenoClean);
                 if(status!=kIOReturnSuccess) {(void)release();return status;}
                 native_adreno_pool_stats[1]=native_adreno_pool_stats[1]+1;
                 return kIOReturnSuccess;
@@ -197,6 +217,7 @@ IOReturn NativeAdrenoMemory::makeWriteCombined()
 {
     if(!(descriptor_ || pooled_) || imported_ || !prepared_ || quarantined_ || device_references_ || write_combined_ || !mapping_ || !span_count_)
         return kIOReturnNotReady;
+    if(pooled_ && pool.write_combined) {write_combined_=true;return kIOReturnSuccess;}
     IOReturn status=NativeAdrenoMaintainOwnedPages(mapping_,bytes_,NativeAdrenoCleanInvalidate);
     if(status)return status;
     status=NativeAdrenoSetPagesCacheMode(spans_,span_count_,true);
@@ -207,6 +228,7 @@ IOReturn NativeAdrenoMemory::release()
 {
     native_adreno_trace_stage=30;
     if(device_references_ || quarantined_)return kIOReturnBusy;
+    if(write_combined_ && pooled_ && pool.write_combined)write_combined_=false;   /* the pool's pages keep the attribute */
     if(write_combined_) {
         /* The pages go back to the VM cacheable, as they came. */
         const IOReturn status=NativeAdrenoSetPagesCacheMode(spans_,span_count_,false);

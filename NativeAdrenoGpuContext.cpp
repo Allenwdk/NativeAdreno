@@ -5,6 +5,7 @@
 
 extern "C" volatile uint32_t native_adreno_pool_mib;
 extern "C" volatile uint32_t native_adreno_pool_stats[8],native_adreno_pool_status;
+extern "C" volatile uint32_t native_adreno_wc_enabled,native_adreno_pool_wc;
 static const uint64_t kIovas[GpuBufferCount]={GpuSqeIova,GpuRingIova,GpuMemptrsIova,GpuPwrupIova,GpuScratchIova};
 static const size_t kBytes[GpuBufferCount]={GpuSqeBytes,GpuRingBytes,GpuPageBytes,GpuPageBytes,GpuPageBytes};
 IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const unsigned slots[2],
@@ -35,6 +36,8 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
             native_adreno_pool_stats[0]=pooled==kIOReturnSuccess?mib:0;native_adreno_pool_status=(uint32_t)pooled;
             if(pooled==kIOReturnSuccess)break;
         }
+        /* Not fatal: without it each pooled BO changes its pages' attribute itself, as a scattered one does. */
+        if(native_adreno_wc_enabled && NativeAdrenoMemory::poolBytes())native_adreno_pool_wc=(uint32_t)NativeAdrenoMemory::writeCombinePool()|1u<<31;
     }
     if(!status)status=tables_.allocate(TablePages*0x1000,report->output_bits,true,TablePages*0x1000);
     for(unsigned i=0;!status && i<GpuBufferCount;++i)
