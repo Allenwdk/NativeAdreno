@@ -296,7 +296,7 @@ bool NativeAdrenoGpuService::start(IOService *provider)
      * (sheng-gpu-power, docs/gpu-hardware-plan.md) shows the GPU SMMU powered and writable: the apps SMMU on this board is
      * hypervisor-managed (docs/native-ufs.md) and the adreno SMMU has not been shown to differ. */
     {
-        uint32_t mib=1024;PE_parse_boot_argn("sheng-gpu-pool",&mib,sizeof(mib));native_adreno_pool_mib=mib;
+        uint32_t mib=1536;PE_parse_boot_argn("sheng-gpu-pool",&mib,sizeof(mib));native_adreno_pool_mib=mib;
     }
     uint32_t bringup=0;
     if(PE_parse_boot_argn("sheng-gpu-bringup",&bringup,sizeof(bringup)) && bringup) {
