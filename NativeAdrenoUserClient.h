@@ -40,6 +40,10 @@ class NativeAdrenoUserClient final {
     const NativeAdrenoStatus *status_=nullptr;
     const NativeAdrenoAbiDeviceInfo *info_=nullptr;
     uint32_t input_bits_=0,output_bits_=0;
+    /* Scope on the shared ring and GPU space: this client's queues are the submit object's queues [queue_base_, +MaxQueues), and with a
+     * window (window_bytes_ nonzero) every mapping must lie inside [window_start_, +window_bytes_), which GetDeviceInfo reports as the VA. */
+    uint32_t queue_base_=0;
+    uint64_t window_start_=0,window_bytes_=0,window_peak_=0;
     uint64_t next_handle_=1;
     bool open_=false;
     Entry *find(uint64_t);
@@ -54,7 +58,12 @@ public:
      * active native4K arena and are reported, never guessed. */
     IOReturn open(uint32_t abi_version,NativeAdrenoVm *,NativeAdrenoSubmit *,
         NativeAdrenoRing *,uint32_t input_bits,uint32_t output_bits);
-    /* Refuses while any object is live or any job is unobserved. */
+    /* One client of several on the same VM, submit object and ring: its queue range (queue_base a multiple of NativeAdrenoAbiMaxQueues) and
+     * GPU address window (4 KiB aligned, inside the input range; bytes 0 = unrestricted). Only while open with no live object or job. */
+    IOReturn setScope(uint32_t queue_base,uint64_t window_start,uint64_t window_bytes);
+    /* Highest end address (exclusive) any mapping of this client has reached, 0 before the first. */
+    uint64_t windowPeak() const {return window_peak_;}
+    /* Refuses while any object is live or any of this client's jobs is unobserved. */
     IOReturn close();
     /* Connection teardown: waits for every outstanding job, then unmaps and frees every object, closes every queue and
      * closes the client. The first failure stops it and leaves what remains live; nothing is forced. */

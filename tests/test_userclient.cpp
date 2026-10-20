@@ -441,6 +441,51 @@ int main()
         CHECK(p.client.close()==kIOReturnSuccess);
         CHECK(p.client.deviceInfo(&got)==kIOReturnNotReady);
     }
+    /* Two clients on one VM, submit object and ring (one per process): each maps only inside its own window and reports it as its VA,
+     * their queues stay apart, and one tears down while the other's job is still outstanding. */
+    {
+        Path p;CHECK(exposed(p)==kIOReturnSuccess);
+        static const NativeAdrenoAbiDeviceInfo info={0x43050a01u,3u<<20,0x1000000ull,0x1fffffffff000ull,0x20000000ull,
+            0x60000000ull,16,6,1,4,NativeAdrenoDeviceClientIova,0};
+        NativeAdrenoUserClient other;
+        CHECK(other.setScope(NativeAdrenoAbiMaxQueues,0x808000,0x8000)==kIOReturnNotReady);
+        CHECK(other.open(NativeAdrenoAbiVersion,&p.vm,&p.execbuf,&p.ring,32,40)==kIOReturnSuccess);
+        CHECK(p.client.attachDeviceInfo(&info)==kIOReturnSuccess && other.attachDeviceInfo(&info)==kIOReturnSuccess);
+        CHECK(p.client.setScope(0,0x800000,0x8000)==kIOReturnSuccess);
+        CHECK(other.setScope(3,0x808000,0x8000)==kIOReturnBadArgument);
+        CHECK(other.setScope(NativeAdrenoAbiMaxQueues,0x808001,0x8000)==kIOReturnBadArgument);
+        CHECK(other.setScope(NativeAdrenoAbiMaxQueues,0xfffff000,0x2000)==kIOReturnBadArgument);   /* past the 32-bit input range */
+        CHECK(other.setScope(NativeAdrenoAbiMaxQueues,0x808000,0x8000)==kIOReturnSuccess);
+        NativeAdrenoAbiDeviceInfo got{};
+        CHECK(other.deviceInfo(&got)==kIOReturnSuccess && got.va_start==0x808000 && got.va_size==0x8000 && got.chip_id==0x43050a01u);
+        CHECK(p.client.deviceInfo(&got)==kIOReturnSuccess && got.va_start==0x800000 && got.va_size==0x8000);
+        NativeAdrenoAbiBoAlloc alloc{8192,12,0};
+        NativeAdrenoAbiBoAllocReply mine{},theirs{};
+        CHECK(p.client.allocBo(&alloc,&mine)==kIOReturnSuccess && other.allocBo(&alloc,&theirs)==kIOReturnSuccess);
+        NativeAdrenoAbiBoMapReply mapped{};
+        NativeAdrenoAbiBoMap trespass{mine.handle,0x808000,3,0,2,0},straddle{theirs.handle,0x80f000,3,0,2,0},below{theirs.handle,0x800000,3,0,2,0};
+        CHECK(p.client.mapBo(&trespass,&mapped)==kIOReturnBadArgument && other.mapBo(&straddle,&mapped)==kIOReturnBadArgument);
+        CHECK(other.mapBo(&below,&mapped)==kIOReturnBadArgument && !other.windowPeak());
+        NativeAdrenoAbiBoMap ours{mine.handle,0x800000,3,0,2,0},yours{theirs.handle,0x80e000,3,0,2,0};
+        CHECK(p.client.mapBo(&ours,&mapped)==kIOReturnSuccess && other.mapBo(&yours,&mapped)==kIOReturnSuccess);
+        CHECK(p.client.windowPeak()==0x802000 && other.windowPeak()==0x810000);
+        CHECK(p.client.setScope(0,0x800000,0x8000)==kIOReturnBusy);   /* objects are live */
+        NativeAdrenoAbiSubmit submit{};
+        NativeAdrenoAbiSubmitReply reply{};
+        submit.buffer_count=1;submit.buffers[0]={mine.handle,0x800000,1024};
+        CHECK(p.client.submit(&submit,&reply,&ringclock)==kIOReturnSuccess && reply.fence==1);
+        submit.buffers[0]={theirs.handle,0x80e000,1024};
+        CHECK(other.submit(&submit,&reply,&ringclock)==kIOReturnSuccess && reply.fence==2);
+        CHECK(p.execbuf.queueOutstanding(0) && p.execbuf.queueOutstanding(NativeAdrenoAbiMaxQueues));
+        fencemem[1]=1;
+        CHECK(p.client.releaseAll(&ringclock,1000)==kIOReturnSuccess && p.client.liveObjects()==0);
+        CHECK(p.execbuf.outstanding()==1 && other.liveObjects()==1);
+        CHECK(other.close()==kIOReturnBusy);
+        CHECK(other.releaseAll(&ringclock,1000)==kIOReturnTimeout && other.liveObjects()==1);
+        fencemem[1]=2;
+        CHECK(other.releaseAll(&ringclock,1000)==kIOReturnSuccess && p.execbuf.outstanding()==0);
+        CHECK(other.deviceInfo(&got)==kIOReturnNotReady);
+    }
     /* Completed work never pins a buffer: no wait() call, the CP only advances its fence, and BoFree still succeeds. */
     {
         Path p;CHECK(exposed(p)==kIOReturnSuccess);
@@ -577,7 +622,7 @@ int main()
         NativeAdrenoAbiQueueReply after{};
         CHECK(p.client.createQueue(&after)==kIOReturnNotReady);
     }
-    std::printf("PASS: 1 complete user-client transaction with pre-submit wait, 1 CPU mapping lease block, 1 queue lifecycle block, 3 metadata refusals, 1 dispatched transaction, 6 dispatch size/argument refusals, 6 allocation refusals, 7 map refusals and 1 poisoned-commit retention case over software SMMU/CP peers\n");
+    std::printf("PASS: 1 complete user-client transaction with pre-submit wait, 1 CPU mapping lease block, 1 queue lifecycle block, 3 metadata refusals, 1 dispatched transaction, 6 dispatch size/argument refusals, 6 allocation refusals, 7 map refusals and 1 poisoned-commit retention case, 1 two-client shared-ring block with 8 scope/window refusals over software SMMU/CP peers\n");
 }
 /* Physical-page maintenance (imported BOs): record it; no host page is touched. */
 /* Host double: the page attribute change of user BOs has no host equivalent (no host page is touched). */

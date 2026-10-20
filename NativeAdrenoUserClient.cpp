@@ -68,12 +68,24 @@ IOReturn NativeAdrenoUserClient::open(uint32_t abi_version,NativeAdrenoVm *vm,
     ring_->requestContextReset();
     return kIOReturnSuccess;
 }
+IOReturn NativeAdrenoUserClient::setScope(uint32_t queue_base,uint64_t window_start,uint64_t window_bytes)
+{
+    if(!open_)return kIOReturnNotReady;
+    if(queue_base%NativeAdrenoAbiMaxQueues || queue_base>UINT32_MAX-NativeAdrenoAbiMaxQueues || (window_start&4095) || (window_bytes&4095) ||
+        (window_bytes && (window_start+window_bytes<window_start || window_start+window_bytes>(UINT64_C(1)<<input_bits_))))
+        return kIOReturnBadArgument;
+    if(liveObjects() || submit_->rangeOutstanding(queue_base_,NativeAdrenoAbiMaxQueues) ||
+        submit_->rangeOutstanding(queue_base,NativeAdrenoAbiMaxQueues))return kIOReturnBusy;
+    queue_base_=queue_base;window_start_=window_start;window_bytes_=window_bytes;window_peak_=0;
+    return kIOReturnSuccess;
+}
 IOReturn NativeAdrenoUserClient::close()
 {
     if(!open_)return kIOReturnNotReady;
-    if(liveObjects() || submit_->outstanding())return kIOReturnBusy;
+    if(liveObjects() || submit_->rangeOutstanding(queue_base_,NativeAdrenoAbiMaxQueues))return kIOReturnBusy;
     for(size_t i=1;i<NativeAdrenoAbiMaxQueues;++i)if(queues_[i].active)return kIOReturnBusy;
     IODeleteData(entries_,Entry,entry_count_);entry_count_=0;
+    queue_base_=0;window_start_=window_bytes_=window_peak_=0;
     open_=false;for(auto &queue:queues_)queue=Queue{};vm_=nullptr;submit_=nullptr;ring_=nullptr;timer_=nullptr;status_=nullptr;info_=nullptr;
     return kIOReturnSuccess;
 }
@@ -81,7 +93,7 @@ IOReturn NativeAdrenoUserClient::releaseAll(const NativeAdrenoRingClock *clock,u
 {
     if(!open_)return kIOReturnNotReady;
     if(!clock)return kIOReturnBadArgument;
-    IOReturn status=submit_->waitAll(clock,timeout_us);
+    IOReturn status=submit_->waitRange(queue_base_,NativeAdrenoAbiMaxQueues,clock,timeout_us);
     if(status)return status;
     for(size_t index=0;index<entry_count_;++index) {
         Entry &entry=entries_[index];
@@ -127,11 +139,11 @@ IOReturn NativeAdrenoUserClient::allocBo(const NativeAdrenoAbiBoAlloc *request,
     IOReturn status=kIOReturnUnsupported;
     const bool prefer_contiguous=request->contiguous==0 && request->bytes>=NativeAdrenoClientContiguousFirstBytes;
     if(prefer_contiguous) {
-        status=entry->memory.allocate((size_t)request->bytes,output_bits_,true,(size_t)request->bytes);
+        status=entry->memory.allocate((size_t)request->bytes,output_bits_,true,(size_t)request->bytes,true);
         if(status && !entry->memory.quarantined() && entry->memory.release()==kIOReturnSuccess)status=kIOReturnUnsupported;
     }
     if(status)
-        status=entry->memory.allocate((size_t)request->bytes,output_bits_,request->contiguous!=0,(size_t)request->bytes);
+        status=entry->memory.allocate((size_t)request->bytes,output_bits_,request->contiguous!=0,(size_t)request->bytes,true);
     /* User BOs are write-combined for the CPU, as the GPU maps them non-cacheable: no per-submission cache maintenance.
      * int-147 kept them cacheable under IO coherence and mapped the GPU side write-back: the first Turnip IB executed zeros and the GPU hung
      * (the kernel's cacheable alias read zeros past the first line too). Turnip maps every BO asking kIOMapWriteCombineCache, the user's
@@ -187,6 +199,8 @@ IOReturn NativeAdrenoUserClient::mapBo(const NativeAdrenoAbiBoMap *request,
     Entry *entry=find(request->handle);
     if(!entry || entry->unreleasable)return kIOReturnBadArgument;
     if(entry->mapped_state)return kIOReturnBusy;
+    const uint64_t end=request->iova+entry->memory.bytes();
+    if(window_bytes_ && (request->iova<window_start_ || end<request->iova || end>window_start_+window_bytes_))return kIOReturnBadArgument;
     uint64_t handle=0;
     /* Memory the owner maps read-only could only be pinned for reading: the GPU gets the read half of what was asked. */
     const unsigned permissions=entry->memory.readOnly()?(request->permissions&~2u):request->permissions;
@@ -198,6 +212,7 @@ IOReturn NativeAdrenoUserClient::mapBo(const NativeAdrenoAbiBoMap *request,
         coherent?1u:request->writeback,coherent?3u:request->shareability,&handle);
     if(status)return status;
     entry->mapped=handle;entry->iova=request->iova;entry->mapped_state=true;
+    if(end>window_peak_)window_peak_=end;
     reply->iova=request->iova;
     return kIOReturnSuccess;
 }
@@ -252,7 +267,7 @@ IOReturn NativeAdrenoUserClient::submit(const NativeAdrenoAbiSubmit *request,
     }
     uint32_t fence=0;
     const IOReturn status=submit_->submit(buffers,request->buffer_count,
-        static_cast<uint32_t>(request->queue),&fence);
+        queue_base_+static_cast<uint32_t>(request->queue),&fence);
     if(status)return status;
     reply->fence=fence;
     return kIOReturnSuccess;
@@ -284,6 +299,7 @@ IOReturn NativeAdrenoUserClient::deviceInfo(NativeAdrenoAbiDeviceInfo *reply)
     if(!open_)return kIOReturnNotReady;
     if(!info_)return kIOReturnUnsupported;
     *reply=*info_;
+    if(window_bytes_){reply->va_start=window_start_;reply->va_size=window_bytes_;}
     return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoUserClient::attachStatus(const NativeAdrenoStatus *status)
@@ -534,7 +550,7 @@ IOReturn NativeAdrenoUserClient::closeQueue(const NativeAdrenoAbiQueue *request)
     Queue &queue=queues_[request->queue];
     if(!queue.active)return kIOReturnBadArgument;
     /* A queue must be drained by the caller before it disappears. */
-    if(submit_->queueOutstanding(static_cast<uint32_t>(request->queue)))
+    if(submit_->queueOutstanding(queue_base_+static_cast<uint32_t>(request->queue)))
         return kIOReturnBusy;
     queue={};
     return kIOReturnSuccess;

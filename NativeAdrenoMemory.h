@@ -53,11 +53,14 @@ public:
      * CPU native4K state and kernel page ABI are checked before allocation.
      * prepare(), raw unmapped physical segments, span/PA bounds and optional
      * physical contiguity are verified before zeroing/PoC publication. */
-    IOReturn allocate(size_t bytes,unsigned output_bits,bool contiguous,size_t byte_budget);
+    /* `pooled`: take the bytes from the BO pool when one is reserved and has room. Only user BOs do: the pool is write-combined for
+     * the CPU (writeCombinePool), and the kernel's own objects (SMMU tables, ring, fence and firmware pages) are walked or read by the
+     * CPU through their cacheable mapping (int-153: page tables from the write-combined pool made each map's table update 2.6x slower). */
+    IOReturn allocate(size_t bytes,unsigned output_bits,bool contiguous,size_t byte_budget,bool pooled=false);
     /* One physically contiguous block taken from the VM early (while memory is not yet fragmented) and cut into BOs afterwards: a BO from it is
      * one span of the GPU's table instead of one per scattered page (int-137: 59474 spans for 332 MiB, the 65536 span capacity ran out,
      * BoMap failed, the translator answered out of device memory and the compositor fell back to the CPU; each map also walked every span, 167 ms).
-     * allocate() uses the pool when one is reserved and has room, else the scattered path. Only the board calls this. */
+     * allocate(..., pooled=true) uses the pool when one is reserved and has room, else the scattered path. Only the board calls this. */
     static IOReturn reservePool(unsigned output_bits,size_t bytes);
     static size_t poolBytes();
     /* The whole pool write-combined once, for good: a pooled BO then takes no page-attribute change on allocation or release.

@@ -94,7 +94,7 @@ IOReturn NativeAdrenoMemory::reservePool(unsigned bits,size_t bytes)
     native_adreno_pool_stats[0]=(uint32_t)(bytes>>20);
     return kIOReturnSuccess;
 }
-IOReturn NativeAdrenoMemory::allocate(size_t bytes,unsigned bits,bool contiguous,size_t budget)
+IOReturn NativeAdrenoMemory::allocate(size_t bytes,unsigned bits,bool contiguous,size_t budget,bool pooled)
 {
     if(descriptor_ || spans_ || quarantined_)return kIOReturnBusy;
     if(!bytes || (bytes&4095) || !outputWidth(bits) || !budget || budget>256u*1024u*1024u)
@@ -103,7 +103,7 @@ IOReturn NativeAdrenoMemory::allocate(size_t bytes,unsigned bits,bool contiguous
     NativeAdrenoCpuState cpu{};
     IOReturn status=NativeAdrenoQueryCpu4K(&cpu);if(status!=kIOReturnSuccess)return status;
     uint64_t limit=UINT64_C(1)<<bits;
-    if(pool.descriptor && bytes<=pool.bytes) {
+    if(pooled && pool.descriptor && bytes<=pool.bytes) {
         size_t offset=0;
         if(poolTake(bytes,&offset)) {
             const uint64_t physical=pool.physical+offset;

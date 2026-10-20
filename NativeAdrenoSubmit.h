@@ -60,6 +60,10 @@ public:
     IOReturn submit(const NativeAdrenoSubmitBuffer *,size_t,uint32_t queue,
         uint32_t *fence);
     bool queueOutstanding(uint32_t queue) const;
+    /* Queues [first, first+count): whether any of their jobs is outstanding, and a wait for every one of them (oldest first) that
+     * leaves other queues' jobs alone. Each client of the shared ring owns one such range. */
+    bool rangeOutstanding(uint32_t first,uint32_t count) const;
+    IOReturn waitRange(uint32_t first,uint32_t count,const NativeAdrenoRingClock *,uint32_t timeout_us);
     /* Retires (without waiting) every job whose fence the CP has already passed, so completed work never pins buffers or
      * job slots just because nobody called wait(). */
     IOReturn retireCompleted();
