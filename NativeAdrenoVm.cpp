@@ -69,10 +69,12 @@ ArmSmmu4KStatus NativeAdrenoVm::observeStreamsOnly() const
     ArmSmmu4KStreamResult routes;
     return ArmSmmu4KObserveOwnedStreams(&io_,streams_,context_,&routes);
 }
+/* The owned routes and context are observed in full every 64th table operation; the ones between read no SMMU register before the
+ * table transaction (int-159: a map read the owned routes before and after its transaction, 0.4 ms of its 1.7 ms). */
 ArmSmmu4KStatus NativeAdrenoVm::observeCheap()
 {
     if(++since_audit_>=64) {since_audit_=0;return observe();}
-    return observeStreamsOnly();
+    return ArmSmmu4KSuccess;
 }
 IOReturn NativeAdrenoVm::fail(ArmSmmu4KStatus status)
 {
@@ -250,7 +252,6 @@ IOReturn NativeAdrenoVm::map(NativeAdrenoMemory *memory,unsigned upper,uint64_t 
     if(status)return fail(status);
     clock.lap(0,3);
     insert(spans,upper);record->mapped_spans=spans;result_.completed_spans=spans;
-    status=observeStreamsOnly();if(status)return fail(status);
     clock.lap(0,4);clock.done(0,memory->bytes());
     record->handle=next_handle_++;*handle=record->handle;result_.complete=true;return kIOReturnSuccess;
 }
@@ -291,9 +292,7 @@ IOReturn NativeAdrenoVm::unmap(uint64_t handle)
     if(status)return fail(status);
     clock.lap(1,3);
     erase(at,spans,upper);record->mapped_spans=0;result_.completed_spans=spans;
-    status=observeStreamsOnly();
     native_adreno_trace_stage=14;
-    if(status)return fail(status);
     clock.lap(1,4);
     if(record->memory->retireAfterQuiescence()!=kIOReturnSuccess)return fail(ArmSmmu4KStateMismatch);
     clock.lap(1,5);clock.done(1,record->memory->bytes());
@@ -312,11 +311,17 @@ IOReturn NativeAdrenoVm::describe(uint64_t handle,uint64_t *iova,size_t *bytes,
     }
     return kIOReturnBadArgument;
 }
+/* TLBIALL of the bank before a submission. Where a table update has observed the bank's image (each region's whole-verification
+ * update remembers its register offset), the invalidation alone: the image and faults were observed there and every 64th table
+ * operation since (int-159: a submission spent 1.3 ms in the kernel, most of it reading SMMU registers). */
 IOReturn NativeAdrenoVm::invalidateTlb()
 {
     if(!attached_ || poisoned_)return kIOReturnNotReady;
     ArmSmmu4KProgramResult r;
-    const ArmSmmu4KStatus status=ArmSmmu4KInvalidateAllOwnedContext(&io_,streams_->bank,context_,budget_,&r);
+    uint64_t offset=0;
+    for(const auto &region:regions_)if(region.state && region.state->context_offset)offset=region.state->context_offset;
+    const ArmSmmu4KStatus status=offset?ArmSmmu4KSyncContextTlb(&io_,offset,context_->asid,1,budget_,&r):
+        ArmSmmu4KInvalidateAllOwnedContext(&io_,streams_->bank,context_,budget_,&r);
     return status?fail(status):kIOReturnSuccess;
 }
 IOReturn NativeAdrenoVm::publishMapped()
