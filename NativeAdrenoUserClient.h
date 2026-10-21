@@ -43,6 +43,10 @@ class NativeAdrenoUserClient final {
     /* Scope on the shared ring and GPU space: this client's queues are the submit object's queues [queue_base_, +MaxQueues), and with a
      * window (window_bytes_ nonzero) every mapping must lie inside [window_start_, +window_bytes_), which GetDeviceInfo reports as the VA. */
     uint32_t queue_base_=0;
+    /* A client owns a queue range once setScope() gave it one or it has submitted into the default one (a single client that never scopes owns
+     * range 0). Before either, queue_base_ is only the default 0, which a scoped client may own, so a check of "this client's own range" would
+     * test someone else's jobs. */
+    bool scoped_=false,used_=false;
     uint64_t window_start_=0,window_bytes_=0,window_peak_=0;
     uint64_t next_handle_=1;
     bool open_=false;
@@ -63,6 +67,8 @@ public:
     IOReturn setScope(uint32_t queue_base,uint64_t window_start,uint64_t window_bytes);
     /* Highest end address (exclusive) any mapping of this client has reached, 0 before the first. */
     uint64_t windowPeak() const {return window_peak_;}
+    /* Whether any job is unobserved in the range this client owns (never, while it owns none). */
+    bool ownRangeOutstanding() const;
     /* Refuses while any object is live or any of this client's jobs is unobserved. */
     IOReturn close();
     /* Connection teardown: waits for every outstanding job, then unmaps and frees every object, closes every queue and
@@ -70,6 +76,8 @@ public:
     IOReturn releaseAll(const NativeAdrenoRingClock *,uint32_t timeout_us);
     /* Backing object of a token returned by cpuMap while its lease is held (clientMemoryForType); null otherwise. */
     NativeAdrenoMemory *memoryForToken(uint32_t token);
+    /* CPU mappings of the BO of this token that BoCpuMap handed out and BoCpuUnmap has not given back; 0 for no such BO. */
+    uint32_t mappingLeases(uint32_t token) const;
     IOReturn query(NativeAdrenoAbiParams *);
     IOReturn allocBo(const NativeAdrenoAbiBoAlloc *,NativeAdrenoAbiBoAllocReply *);
     IOReturn mapBo(const NativeAdrenoAbiBoMap *,NativeAdrenoAbiBoMapReply *);

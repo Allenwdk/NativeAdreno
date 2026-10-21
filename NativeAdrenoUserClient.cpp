@@ -21,6 +21,7 @@ static void noteImport(IOReturn status,uint32_t stage,uint64_t bytes,uint64_t ad
 }
 #include <IOKit/IOLib.h>
 #include <string.h>
+extern "C" {volatile uint32_t native_adreno_window_overflow[4][3];}   /* {count, last size KiB, last end MiB} per client window */
 NativeAdrenoUserClient::Entry *NativeAdrenoUserClient::find(uint64_t handle)
 {
     if(handle)for(size_t i=0;i<entry_count_;++i)if(entries_[i].used && entries_[i].handle==handle)return &entries_[i];
@@ -74,18 +75,23 @@ IOReturn NativeAdrenoUserClient::setScope(uint32_t queue_base,uint64_t window_st
     if(queue_base%NativeAdrenoAbiMaxQueues || queue_base>UINT32_MAX-NativeAdrenoAbiMaxQueues || (window_start&4095) || (window_bytes&4095) ||
         (window_bytes && (window_start+window_bytes<window_start || window_start+window_bytes>(UINT64_C(1)<<input_bits_))))
         return kIOReturnBadArgument;
-    if(liveObjects() || submit_->rangeOutstanding(queue_base_,NativeAdrenoAbiMaxQueues) ||
-        submit_->rangeOutstanding(queue_base,NativeAdrenoAbiMaxQueues))return kIOReturnBusy;
-    queue_base_=queue_base;window_start_=window_start;window_bytes_=window_bytes;window_peak_=0;
+    /* A client that owns no range yet has none to drain: its queue_base_ is the default 0, the render server's range, and the render server
+     * nearly always has a job in flight, so every other process was refused here with kIOReturnBusy (int-200: WidgetRenderer_Default). */
+    if(liveObjects() || ownRangeOutstanding() || submit_->rangeOutstanding(queue_base,NativeAdrenoAbiMaxQueues))return kIOReturnBusy;
+    queue_base_=queue_base;scoped_=true;window_start_=window_start;window_bytes_=window_bytes;window_peak_=0;
     return kIOReturnSuccess;
+}
+bool NativeAdrenoUserClient::ownRangeOutstanding() const
+{
+    return (scoped_ || used_) && submit_->rangeOutstanding(queue_base_,NativeAdrenoAbiMaxQueues);
 }
 IOReturn NativeAdrenoUserClient::close()
 {
     if(!open_)return kIOReturnNotReady;
-    if(liveObjects() || submit_->rangeOutstanding(queue_base_,NativeAdrenoAbiMaxQueues))return kIOReturnBusy;
+    if(liveObjects() || ownRangeOutstanding())return kIOReturnBusy;
     for(size_t i=1;i<NativeAdrenoAbiMaxQueues;++i)if(queues_[i].active)return kIOReturnBusy;
     IODeleteData(entries_,Entry,entry_count_);entry_count_=0;
-    queue_base_=0;window_start_=window_bytes_=window_peak_=0;
+    queue_base_=0;scoped_=used_=false;window_start_=window_bytes_=window_peak_=0;
     open_=false;for(auto &queue:queues_)queue=Queue{};vm_=nullptr;submit_=nullptr;ring_=nullptr;timer_=nullptr;status_=nullptr;info_=nullptr;
     return kIOReturnSuccess;
 }
@@ -93,7 +99,7 @@ IOReturn NativeAdrenoUserClient::releaseAll(const NativeAdrenoRingClock *clock,u
 {
     if(!open_)return kIOReturnNotReady;
     if(!clock)return kIOReturnBadArgument;
-    IOReturn status=submit_->waitRange(queue_base_,NativeAdrenoAbiMaxQueues,clock,timeout_us);
+    IOReturn status=(scoped_ || used_)?submit_->waitRange(queue_base_,NativeAdrenoAbiMaxQueues,clock,timeout_us):kIOReturnSuccess;
     if(status)return status;
     for(size_t index=0;index<entry_count_;++index) {
         Entry &entry=entries_[index];
@@ -111,6 +117,12 @@ NativeAdrenoMemory *NativeAdrenoUserClient::memoryForToken(uint32_t token)
     if(!open_ || !token || token>entry_count_)return nullptr;
     Entry &entry=entries_[token-1];
     return entry.used && !entry.unreleasable && entry.token==token && entry.mapping_leases?&entry.memory:nullptr;
+}
+uint32_t NativeAdrenoUserClient::mappingLeases(uint32_t token) const
+{
+    if(!open_ || !token || token>entry_count_)return 0;
+    const Entry &entry=entries_[token-1];
+    return entry.used && entry.token==token?entry.mapping_leases:0;
 }
 IOReturn NativeAdrenoUserClient::query(NativeAdrenoAbiParams *params)
 {
@@ -200,7 +212,16 @@ IOReturn NativeAdrenoUserClient::mapBo(const NativeAdrenoAbiBoMap *request,
     if(!entry || entry->unreleasable)return kIOReturnBadArgument;
     if(entry->mapped_state)return kIOReturnBusy;
     const uint64_t end=request->iova+entry->memory.bytes();
-    if(window_bytes_ && (request->iova<window_start_ || end<request->iova || end>window_start_+window_bytes_))return kIOReturnBadArgument;
+    if(window_bytes_ && (request->iova<window_start_ || end<request->iova || end>window_start_+window_bytes_)) {
+        /* Per window: how often a mapping fell outside it, and the last one's size and end (MiB), for the boot log's [gpu windows] row. */
+        const uint32_t slot=queue_base_/NativeAdrenoAbiMaxQueues;
+        if(slot<4) {
+            native_adreno_window_overflow[slot][0]=native_adreno_window_overflow[slot][0]+1;
+            native_adreno_window_overflow[slot][1]=uint32_t(entry->memory.bytes()>>10);
+            native_adreno_window_overflow[slot][2]=uint32_t(end>>20);
+        }
+        return kIOReturnBadArgument;
+    }
     uint64_t handle=0;
     /* Memory the owner maps read-only could only be pinned for reading: the GPU gets the read half of what was asked. */
     const unsigned permissions=entry->memory.readOnly()?(request->permissions&~2u):request->permissions;
@@ -266,6 +287,7 @@ IOReturn NativeAdrenoUserClient::submit(const NativeAdrenoAbiSubmit *request,
         buffers[i]={entry->mapped,wire.iova,(size_t)wire.bytes};
     }
     uint32_t fence=0;
+    used_=true;
     const IOReturn status=submit_->submit(buffers,request->buffer_count,
         queue_base_+static_cast<uint32_t>(request->queue),&fence);
     if(status)return status;

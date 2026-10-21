@@ -38,7 +38,7 @@ struct NativeAdrenoMetalDiag {
 } native_adreno_metal_diag;
 /* BO CPU views (clientMemoryForType for a BO token): [0] calls, [1] new descriptors, [2] served from the view cache, [3] refused (not a BO / out of
  * resources), [4] last refusal's IOReturn, [5] threads inside now. int-115 showed a backboardd thread in IOConnectMapMemory64 ~650 times a second. */
-extern "C" {volatile uint32_t native_adreno_view_diag[6];}
+extern "C" {volatile uint32_t native_adreno_view_diag[6],native_adreno_view_kept;}   /* kept: BoCpuUnmap calls that left the view for another lease */
 }
 
 /* The open type the Adreno plugin passes to IOServiceOpen ('AG'); it lets the driver tell the plugin from the original IOGPU library
@@ -93,6 +93,11 @@ volatile uint32_t native_adreno_open_log_count;
  * closes, the slot of its live connection (0xff none), the highest GPU address its mappings reached (MiB) and its last refusal. */
 struct NativeAdrenoClientRecord {char name[20]; uint32_t opens, refused, closes, slot, peak_mib, last_refusal;};
 struct NativeAdrenoClientRecord native_adreno_client_log[8];
+/* The last text line (the plugin's failure reason) each process other than the render server streamed: process name and a 64-byte line. */
+struct NativeAdrenoClientText {char name[20]; char text[64];};
+struct NativeAdrenoClientText native_adreno_client_text[4];
+/* Why the latest mount of a connection failed: [0] 1 no free slot, 2 the core's open, 3 the window scope; [1] its IOReturn; [2] the slot; [3] failures so far. */
+volatile uint32_t native_adreno_mount_fail[4];
 /* Processes that read MetalPluginName (the Metal discovery), first twelve names, with counts. */
 struct NativeAdrenoAskerRecord {char name[20]; uint32_t reads;};
 struct NativeAdrenoAskerRecord native_adreno_metal_askers[12];
@@ -100,9 +105,13 @@ struct NativeAdrenoAskerRecord native_adreno_metal_askers[12];
 /* GPU address windows inside the board's VA range (GpuPowerProbe gDeviceInfo: 0x20000000..0x80000000 of the 2 GiB aperture). Slot 0 is the
  * render server's (it held the whole 1.5 GiB alone before int-155 and used at most a few hundred MiB); slots 1 and 2 are for other Metal
  * processes. A kernel connection (the board's self-test) maps where it likes and is never scoped. */
-enum : unsigned {NativeAdrenoMaxClients=3};
+/* Slot 0 is the render server's 1 GiB (it reached 934 MiB in int-196); the rest of the aperture is shared by three more processes (PosterBoard for the
+ * wallpaper, iconservicesagent for the icons, WidgetRenderer_Default for the widgets: int-196's screen pictures showed a black wallpaper and white widget
+ * boxes, none of which had a native device), 170 MiB each (page aligned). int-198: iconservicesagent reached 128 MiB into its window and then lost its
+ * Metal device; whether the window is the cause is what the [gpu windows] log row decides before these sizes change. */
+enum : unsigned {NativeAdrenoMaxClients=4};
 static const struct {uint64_t start,bytes;} kClientWindows[NativeAdrenoMaxClients]={
-    {0x20000000ull,0x40000000ull},{0x60000000ull,0x10000000ull},{0x70000000ull,0x10000000ull}};
+    {0x20000000ull,0x40000000ull},{0x60000000ull,0x0AAA9000ull},{0x6AAA9000ull,0x0AAA9000ull},{0x75552000ull,0x0AAA9000ull}};
 
 namespace {
 void shiftName(char names[3][17]) {
@@ -171,6 +180,7 @@ OSDefineMetaClassAndStructors(AGXDeviceUserClient,IOUserClient)
 
 void nativeAdrenoMailboxPoller(void *,wait_result_t)
 {
+    thread_set_thread_name(current_thread(),"sheng-gpu-mailbox");
     uint32_t last=0;
     for(;;) {
         IOSleep(1);
@@ -222,17 +232,22 @@ bool AGXDeviceUserClient::mount(bool kernel)
         if(!strncmp(name_,"backboardd",sizeof name_) && !g.slots[0])slot=0;
         for(unsigned i=1;slot==NativeAdrenoMaxClients && i<NativeAdrenoMaxClients;++i)if(!g.slots[i])slot=i;
     }
-    if(slot<NativeAdrenoMaxClients && core->open(NativeAdrenoAbiVersion,g.vm,g.submit,g.ring,g.input_bits,g.output_bits)==kIOReturnSuccess) {
+    const IOReturn opened=slot<NativeAdrenoMaxClients?core->open(NativeAdrenoAbiVersion,g.vm,g.submit,g.ring,g.input_bits,g.output_bits):kIOReturnNoSpace;
+    if(opened!=kIOReturnSuccess) {native_adreno_mount_fail[0]=slot<NativeAdrenoMaxClients?2:1;native_adreno_mount_fail[1]=uint32_t(opened);native_adreno_mount_fail[2]=slot;native_adreno_mount_fail[3]=native_adreno_mount_fail[3]+1;}
+    if(opened==kIOReturnSuccess) {
         if(g.timer)core->attachTimer(g.timer);
         if(g.info)core->attachDeviceInfo(g.info);
         /* Queue ranges: the kernel client keeps range 0 alone (no user slot is live while the board's self-test runs); users get their slot's. */
-        const IOReturn scoped=kernel?kIOReturnSuccess:core->setScope(slot*NativeAdrenoAbiMaxQueues,kClientWindows[slot].start,kClientWindows[slot].bytes);
+        const IOReturn scoped=kernel?core->setScope(0,0,0):core->setScope(slot*NativeAdrenoAbiMaxQueues,kClientWindows[slot].start,kClientWindows[slot].bytes);
         if(scoped==kIOReturnSuccess) {
             core_=core;core=nullptr;slot_=slot;kernel_=kernel;live_=true;ok=true;
             if(kernel)g.kernel_client=true;else g.slots[slot]=true;
             ++g.opened;
             if(NativeAdrenoClientRecord *record=clientRecord(name_))record->slot=slot;
-        } else core->releaseAll(&g.clock,0);
+        } else {
+            native_adreno_mount_fail[0]=3;native_adreno_mount_fail[1]=uint32_t(scoped);native_adreno_mount_fail[2]=slot;native_adreno_mount_fail[3]=native_adreno_mount_fail[3]+1;
+            core->releaseAll(&g.clock,0);
+        }
     }
     /* The mailbox page and its poller serve the render server's connection only. */
     if(ok && !kernel && slot==0 && !strncmp(name_,"backboardd",sizeof name_)) {
@@ -299,7 +314,7 @@ IOReturn AGXDeviceUserClient::clientClose()
 void AGXDeviceUserClient::free()
 {
     dropViews(0);
-    if(views_) {IODeleteData(views_,View,MaxViews);views_=nullptr;}
+    if(views_) {IODelete(views_,View,MaxViews);views_=nullptr;}
     /* Still live only when a teardown failed: its objects stay referenced by the VM and the ring, so the core is kept, not freed. */
     if(core_ && !live_) {delete core_;core_=nullptr;}
     IOUserClient::free();
@@ -455,8 +470,18 @@ IOReturn AGXDeviceUserClient::run(uint32_t method,const void *input,size_t input
         native_adreno_export_stats[2]=piece.generation;native_adreno_export_stats[3]=piece.total;
         return kIOReturnSuccess;
     }
-    if(method==NativeAdrenoMethodBoCpuUnmap && input && input_size==sizeof(NativeAdrenoAbiBoCpuUnmap))
-        dropViews(static_cast<const NativeAdrenoAbiBoCpuUnmap *>(input)->token);
+    if(method==NativeAdrenoMethodBoCpuUnmap && input && input_size==sizeof(NativeAdrenoAbiBoCpuUnmap)) {
+        /* The view is shared by every CPU mapping of the BO, and dropViews removes all of them. A BO mapped twice (the view cache served 207
+         * second requests in int-177) lost both mappings at the first unmap, and the other holder's next store hit an unmapped page: the
+         * render server's crash in the command stream writes of vkCmdCopyBuffer. Only the last lease takes the view down; the earlier
+         * ones leave their mapping until it, or the client unmaps it itself (IOConnectUnmapMemory64 works on the cached view). */
+        const uint32_t token=static_cast<const NativeAdrenoAbiBoCpuUnmap *>(input)->token;
+        IOLockLock(g.lock);
+        const uint32_t leases=live_?core_->mappingLeases(token):0;
+        IOLockUnlock(g.lock);
+        if(leases>1)native_adreno_view_kept=native_adreno_view_kept+1;
+        else dropViews(token);
+    }
     if(method==NativeAdrenoMethodBoImport) {
         /* The pages belong to the task making this call (an external method runs in the caller's context). */
         if(!input || input_size!=sizeof(NativeAdrenoAbiBoImport) || !output || output_size!=sizeof(NativeAdrenoAbiBoAllocReply))
@@ -568,6 +593,16 @@ extern "C" IOReturn native_adreno_new_user_client(IOService *provider,task_t own
             static_assert(sizeof(native_adreno_metal_diag.report)==sizeof(native_adreno_metal_diag.report2),"stream lines");
             if(value==0x7fff || value==0x7ffe) {
                 line=value==0x7fff?native_adreno_metal_diag.report2:native_adreno_metal_diag.report;
+                /* A line from a process other than the render server goes to that process's own row (native_adreno_client_text): the render server
+                 * rewrites report2 every ten seconds, so the reason another process's device failed would be gone from it. */
+                char who[20]={};
+                proc_selfname(who,sizeof who);
+                if(value==0x7fff && strncmp(who,"backboardd",sizeof who)) {
+                    for(auto &entry:native_adreno_client_text) {
+                        if(!entry.name[0]) strlcpy(entry.name,who,sizeof entry.name);
+                        if(!strncmp(entry.name,who,sizeof entry.name)) {line=entry.text;break;}
+                    }
+                }
                 memset(line,0,sizeof(native_adreno_metal_diag.report2));length=0;
             }
             else if(value<0x7100 && length<sizeof(native_adreno_metal_diag.report2)-1) {line[length++]=char(value&0xff);line[length]=0;}
