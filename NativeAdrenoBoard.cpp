@@ -55,3 +55,27 @@ IOReturn NativeAdrenoBoard::parseReg(const uint8_t *cells,size_t length,
     *count=total;
     return kIOReturnSuccess;
 }
+IOReturn NativeAdrenoBoard::findRegName(const uint8_t *names,size_t length,const char *name,
+    size_t *index)
+{
+    if(!index)return kIOReturnBadArgument;
+    *index=0;
+    if(!names || !length || !name || !*name)return kIOReturnBadArgument;
+    size_t at=0,position=0;
+    while(at<length) {
+        size_t end=at;
+        while(end<length && names[end])++end;
+        if(end==length)return kIOReturnBadArgument; /* unterminated list */
+        const size_t bytes=end-at;
+        if(!bytes || bytes>63)return kIOReturnBadArgument;
+        size_t match=0;
+        while(match<bytes && name[match] && names[at+match]==name[match])++match;
+        if(match==bytes && !name[match]) {
+            *index=position;
+            return kIOReturnSuccess;
+        }
+        ++position;
+        at=end+1;
+    }
+    return kIOReturnNotFound;
+}

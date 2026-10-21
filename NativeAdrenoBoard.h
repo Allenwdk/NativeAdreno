@@ -28,5 +28,11 @@ public:
         uint32_t cells_per_entry,uint16_t *stream_ids,size_t capacity,size_t *count);
     static IOReturn parseReg(const uint8_t *cells,size_t length,uint32_t address_cells,
         uint32_t size_cells,NativeAdrenoWindow *windows,size_t capacity,size_t *count);
+    /* Find an exact entry in a device's NUL-separated `reg-names` property.
+     * The index is the position of the name, so it selects the matching range
+     * parsed by parseReg. A missing name is kIOReturnNotFound; malformed input
+     * (empty, unterminated or a name longer than 63 bytes) is refused. */
+    static IOReturn findRegName(const uint8_t *names,size_t length,const char *name,
+        size_t *index);
 };
 #endif

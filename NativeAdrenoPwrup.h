@@ -25,9 +25,13 @@ public:
     /* regs/values are parallel arrays; dynamic triplets are {aperture,offset,
      * value} in that order. Output is the exact byte image; *written receives
      * the length on success. */
-    /* Read the sixteen A740 preemption registers through the callback (raw
+    /* Read the sixteen A7xx power-up registers through the callback (raw
      * 32-bit GPU register reads) and pack them with zero IFPC and dynamic
-     * counts. A read failure refuses and writes nothing. */
+     * counts. A732 and A740 share a7xx_pwrup_reglist. A read failure refuses
+     * and writes nothing. */
+    static IOReturn buildA7xx(int (*read)(void *,uint32_t,uint32_t *),void *cookie,
+        uint8_t *out,size_t capacity,size_t *written);
+    /* Historical name kept for the A740 call sites and tests. */
     static IOReturn buildA740(int (*read)(void *,uint32_t,uint32_t *),void *cookie,
         uint8_t *out,size_t capacity,size_t *written);
     static IOReturn pack(const NativeAdrenoPwrupCounts &,

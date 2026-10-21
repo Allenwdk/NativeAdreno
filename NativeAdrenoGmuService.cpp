@@ -15,6 +15,17 @@ OSDefineMetaClassAndStructors(NativeAdrenoGmuService,IOService)
 
 
 
+static bool contains(const char *text,size_t length,const char *needle)
+{
+    const size_t bytes=needle?__builtin_strlen(needle):0;
+    if(!text || !bytes || bytes>length)return false;
+    for(size_t at=0;at+bytes<=length;++at) {
+        size_t index=0;
+        while(index<bytes && text[at+index]==needle[index])++index;
+        if(index==bytes)return true;
+    }
+    return false;
+}
 static bool advertisesGmu(IOService *provider)
 {
     OSObject *property=provider?provider->getProperty("compatible"):nullptr;
@@ -22,13 +33,10 @@ static bool advertisesGmu(IOService *provider)
     if(!data || !data->getBytesNoCopy() || !data->getLength())return false;
     const char *text=static_cast<const char *>(data->getBytesNoCopy());
     const size_t length=data->getLength();
-    static const char needle[]="qcom,adreno-gmu";
-    for(size_t at=0;at+sizeof(needle)-1<=length;++at) {
-        size_t index=0;
-        while(index<sizeof(needle)-1 && text[at+index]==needle[index])++index;
-        if(index==sizeof(needle)-1)return true;
-    }
-    return false;
+    /* SM8550 publishes qcom,adreno-gmu-740.1; SM7675 publishes qcom,gen7-gmu.
+     * Both are the same seven-window GMU block this node maps. */
+    return contains(text,length,"qcom,adreno-gmu") ||
+        contains(text,length,"qcom,gen7-gmu");
 }
 IOService *NativeAdrenoGmuService::probe(IOService *provider,SInt32 *score)
 {

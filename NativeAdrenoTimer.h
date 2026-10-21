@@ -6,10 +6,11 @@
 
 /* GPU always-on counter reader for the user-visible timestamp. Two sources are
  * distinguished because their address spaces differ:
- *  - GMU window: byte offsets inside the already bound GMU window. The A740
- *    offset is derived from the pinned a6xx_gmu.xml dword offset 0x1f888 and
- *    the SM8550 DT layout: (0x1f888 << 2) - (gmu 0x03d6a000 - gpu 0x03d00000)
- *    = 0x14220 for the low word and 0x14224 for the high word.
+ *  - GMU window: byte offsets inside the already bound GPU window. The GMU
+ *    counter is a6xx_gmu.xml dword 0x1f888 (A6XX..A7XX); its byte offset is
+ *    (0x1f888 << 2) minus the distance from the GPU base to the GMU base.
+ *    SM8550 (gmu 0x03d6a000, gpu 0x03d00000) gives 0x14220; SM7675
+ *    (gmu 0x03d68000) gives 0x16220. setGmuBaseDelta selects the board.
  *  - CP window: dword register indices in the GPU register window, from
  *    a6xx.xml CP_ALWAYS_ON_COUNTER at 0x0980 for A6XX..A7XX.
  * The caller binds exactly one already powered window; this object performs no
@@ -34,6 +35,10 @@ public:
     IOReturn attach(const NativeAdrenoTimeIo *,uint32_t source);
     IOReturn detach();
     IOReturn read(uint64_t *ticks) const;
+    /* Select the board's GMU-to-GPU register delta before attaching a timer.
+     * The default is the SM8550 layout so an early A740 caller is unchanged. */
+    static void setGmuBaseDelta(uint32_t delta);
+    static uint32_t gmuBaseDelta();
     static uint32_t gmuLowOffset();
     static uint32_t gmuHighOffset();
     static uint32_t cpLowRegister();

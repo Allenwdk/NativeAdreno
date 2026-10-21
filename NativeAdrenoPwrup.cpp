@@ -9,6 +9,11 @@ size_t NativeAdrenoPwrupList::requiredBytes(const NativeAdrenoPwrupCounts &count
     return HeaderBytes+size_t(counts.ifpc+counts.preemption)*PairBytes+
         size_t(counts.dynamic)*TripletBytes;
 }
+IOReturn NativeAdrenoPwrupList::buildA7xx(int (*read)(void *,uint32_t,uint32_t *),
+    void *cookie,uint8_t *out,size_t capacity,size_t *written)
+{
+    return buildA740(read,cookie,out,capacity,written);
+}
 IOReturn NativeAdrenoPwrupList::buildA740(int (*read)(void *,uint32_t,uint32_t *),
     void *cookie,uint8_t *out,size_t capacity,size_t *written)
 {

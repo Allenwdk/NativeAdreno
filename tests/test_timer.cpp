@@ -40,6 +40,16 @@ int main()
         CHECK(NativeAdrenoTimer::cpHighRegister()==0x0981);
         CHECK(NativeAdrenoTimer::gmuHighOffset()==NativeAdrenoTimer::gmuLowOffset()+4);
     }
+    /* The SM7675 GMU window starts 0x68000 after the GPU window. */
+    {
+        NativeAdrenoTimer::setGmuBaseDelta(0x68000);
+        CHECK(NativeAdrenoTimer::gmuBaseDelta()==0x68000);
+        CHECK(NativeAdrenoTimer::gmuLowOffset()==0x16220);
+        CHECK(NativeAdrenoTimer::gmuHighOffset()==0x16224);
+        NativeAdrenoTimer::setGmuBaseDelta(0x6a000);
+        CHECK(NativeAdrenoTimer::gmuBaseDelta()==0x6a000);
+        CHECK(NativeAdrenoTimer::gmuLowOffset()==0x14220);
+    }
     /* A stable 64-bit counter reads exactly, through both address spaces. */
     {
         peer=Peer{};peer.low=0x89abcdefu;peer.high=0x01234567u;
@@ -94,5 +104,5 @@ int main()
         CHECK(timer.read(&ticks)==kIOReturnTimeout && !ticks);
         CHECK(unsettled_reads==3*8);
     }
-    std::printf("PASS: 1 derived-offset check, 2 stable reads, 1 rollover retry, 1 I/O failure and 1 bounded torn-loop timeout over a software counter peer\n");
+    std::printf("PASS: 2 derived-offset checks, 2 stable reads, 1 rollover retry, 1 I/O failure and 1 bounded torn-loop timeout over a software counter peer\n");
 }
