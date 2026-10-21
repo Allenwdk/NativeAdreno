@@ -1,24 +1,35 @@
 /* SPDX-License-Identifier: MIT */
 #include "NativeAdrenoTimer.h"
+#include "NativeAdrenoProfile.h"
 #include <IOKit/IOLib.h>
 
 /* Derivation, not a guess:
  *   pinned a6xx_gmu.xml  GMU_ALWAYS_ON_COUNTER_L 0x1f888, _H 0x1f889
  *                        (dword offsets, variants A6XX-A7XX)
- *   pinned sm8550.dtsi   gpu@3d00000, gmu@3d6a000
  *   byte offset = (offset << 2) - (gmu_base - gpu_base)
- *               = (0x1f888 << 2) - 0x6a000 = 0x14220
+ *   SM8550 (gmu 0x03d6a000, gpu 0x03d00000): 0x7e220 - 0x6a000 = 0x14220
+ *   SM7675 (gmu 0x03d68000, gpu 0x03d00000): 0x7e220 - 0x68000 = 0x16220
  *   pinned a6xx.xml      CP_ALWAYS_ON_COUNTER 0x0980 (64-bit, A6XX-A7XX)
- *     read as low at 0x0980 and high at 0x0981, as Linux gpu_read64 does. */
+ *     read as low at 0x0980 and high at 0x0981, as Linux gpu_read64 does.
+ * The delta is a property of the board's register layout, so the GPU service
+ * sets it from the two mapped window bases before a timer is attached. */
 enum : uint32_t {
-    TimerGmuLow = 0x14220,
-    TimerGmuHigh = 0x14224,
+    TimerGmuDefault = 0x14220,
     TimerCpLow = 0x0980,
     TimerCpHigh = 0x0981,
     TimerRetries = 8
 };
-uint32_t NativeAdrenoTimer::gmuLowOffset(){return TimerGmuLow;}
-uint32_t NativeAdrenoTimer::gmuHighOffset(){return TimerGmuHigh;}
+static uint32_t gmu_low_offset=TimerGmuDefault;
+void NativeAdrenoTimer::setGmuBaseDelta(uint32_t delta)
+{
+    gmu_low_offset=NativeAdrenoProfileTable::timerGmuLowOffset(delta);
+}
+uint32_t NativeAdrenoTimer::gmuBaseDelta()
+{
+    return 0x1f888u*4u-gmu_low_offset;
+}
+uint32_t NativeAdrenoTimer::gmuLowOffset(){return gmu_low_offset;}
+uint32_t NativeAdrenoTimer::gmuHighOffset(){return gmu_low_offset+4;}
 uint32_t NativeAdrenoTimer::cpLowRegister(){return TimerCpLow;}
 uint32_t NativeAdrenoTimer::cpHighRegister(){return TimerCpHigh;}
 IOReturn NativeAdrenoTimer::attach(const NativeAdrenoTimeIo *io,uint32_t source)
@@ -39,8 +50,8 @@ IOReturn NativeAdrenoTimer::read(uint64_t *ticks) const
 {
     if(!ticks)return kIOReturnBadArgument;*ticks=0;
     if(!attached_)return kIOReturnNotReady;
-    const uint32_t low=source_==NativeAdrenoTimeGmu?TimerGmuLow:TimerCpLow;
-    const uint32_t high=source_==NativeAdrenoTimeGmu?TimerGmuHigh:TimerCpHigh;
+    const uint32_t low=source_==NativeAdrenoTimeGmu?gmu_low_offset:TimerCpLow;
+    const uint32_t high=source_==NativeAdrenoTimeGmu?gmu_low_offset+4:TimerCpHigh;
     for(unsigned attempt=0;attempt<TimerRetries;++attempt) {
         uint32_t first=0,low_word=0,second=0;
         if(io_.read32(io_.cookie,high,&first) ||
