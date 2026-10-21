@@ -13,6 +13,17 @@ OSDefineMetaClassAndStructors(NativeAdrenoSmmuService,IOService)
 
 
 
+static bool contains(const char *text,size_t length,const char *needle)
+{
+    const size_t bytes=needle?__builtin_strlen(needle):0;
+    if(!text || !bytes || bytes>length)return false;
+    for(size_t at=0;at+bytes<=length;++at) {
+        size_t index=0;
+        while(index<bytes && text[at+index]==needle[index])++index;
+        if(index==bytes)return true;
+    }
+    return false;
+}
 static bool advertisesSmmu(IOService *provider)
 {
     OSObject *property=provider?provider->getProperty("compatible"):nullptr;
@@ -20,13 +31,10 @@ static bool advertisesSmmu(IOService *provider)
     if(!data || !data->getBytesNoCopy() || !data->getLength())return false;
     const char *text=static_cast<const char *>(data->getBytesNoCopy());
     const size_t length=data->getLength();
-    static const char needle[]="qcom,adreno-smmu";
-    for(size_t at=0;at+sizeof(needle)-1<=length;++at) {
-        size_t index=0;
-        while(index<sizeof(needle)-1 && text[at+index]==needle[index])++index;
-        if(index==sizeof(needle)-1)return true;
-    }
-    return false;
+    /* SM8550 publishes qcom,adreno-smmu; SM7675 publishes
+     * qcom,kgsl-smmu-v2. Both are an ARM SMMUv2 global block. */
+    return contains(text,length,"qcom,adreno-smmu") ||
+        contains(text,length,"qcom,kgsl-smmu-v2");
 }
 IOService *NativeAdrenoSmmuService::probe(IOService *provider,SInt32 *score)
 {

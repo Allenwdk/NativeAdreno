@@ -16,6 +16,7 @@
 #include <IOKit/IOUserClient.h>
 #include "NativeAdrenoBoard.h"
 #include "NativeAdrenoFirmware.h"
+#include "NativeAdrenoProfile.h"
 #include "NativeAdrenoGmuConfig.h"
 #include "NativeAdrenoGmuContext.h"
 #include "NativeAdrenoGmuPlatform.h"
@@ -26,6 +27,7 @@
 #include "NativeAdrenoCpInit.h"
 #include "NativeAdrenoPwrup.h"
 #include "NativeAdrenoRing.h"
+#include "NativeAdrenoTimer.h"
 #include "ShengGmuCommandDb.h"
 #include "NativeAdrenoSmmuService.h"
 #include <pexpert/pexpert.h>
@@ -48,6 +50,7 @@ extern "C" const uint64_t native_adreno_sqe_firmware_image_size __attribute__((w
 #include "NativeAdrenoUserClient.h"
 /* Physical address of the fence page (the CP writes its timestamps there): the board log reads it from DRAM and through the CPU cache. */
 extern "C" {volatile uint64_t native_adreno_fence_phys=0;}
+enum : size_t { NoWindow = ~size_t(0) };
 
 class NativeAdrenoGpuClient;
 static IOUserClient *createGpuClient(task_t,void *,UInt32,OSDictionary *,NativeAdrenoUserClient *);
@@ -58,7 +61,8 @@ struct NativeAdrenoGpuWindow {
 };
 class NativeAdrenoGpuService : public IOService {
     OSDeclareDefaultStructors(NativeAdrenoGpuService)
-    OSSharedPtr<IOMemoryMap> maps_[2];
+    OSSharedPtr<IOMemoryMap> maps_[4];
+    const NativeAdrenoProfile *profile_=nullptr;
     NativeAdrenoGmuContext gmu_ctx_;
     NativeAdrenoGmuPlatform gmu_platform_;
     ShengGmuIo gmu_io_{};
@@ -108,6 +112,39 @@ static bool advertisesAdreno(IOService *provider)
         if(index==sizeof(needle)-1)return true;
     }
     return false;
+}
+static uint32_t cell32(const uint8_t *p)
+{
+    return (uint32_t(p[0])<<24)|(uint32_t(p[1])<<16)|(uint32_t(p[2])<<8)|uint32_t(p[3]);
+}
+/* qcom,chipid arrives as an OSNumber on some platform-device providers and as
+ * the raw four-byte DT cell on others. Both byte orders are tried against the
+ * exact profile table, so an unreadable or unknown id stays zero. */
+static uint32_t providerChipId(IOService *provider)
+{
+    if(!provider)return 0;
+    if(OSNumber *number=OSDynamicCast(OSNumber,provider->getProperty("qcom,chipid"))) {
+        const uint64_t value=number->unsigned64BitValue();
+        if(value<=UINT32_MAX && NativeAdrenoProfileTable::find(uint32_t(value)))
+            return uint32_t(value);
+    }
+    OSData *data=OSDynamicCast(OSData,provider->getProperty("qcom,chipid"));
+    if(!data || data->getLength()<4 || !data->getBytesNoCopy())return 0;
+    const uint8_t *bytes=static_cast<const uint8_t *>(data->getBytesNoCopy());
+    const uint32_t big=cell32(bytes);
+    if(NativeAdrenoProfileTable::find(big))return big;
+    const uint32_t little=uint32_t(bytes[0])|uint32_t(bytes[1])<<8|
+        uint32_t(bytes[2])<<16|uint32_t(bytes[3])<<24;
+    return NativeAdrenoProfileTable::find(little)?little:0;
+}
+static bool windowNamed(IOService *provider,const char *name,size_t *index)
+{
+    if(!provider || !index)return false;
+    OSData *names=OSDynamicCast(OSData,provider->getProperty("reg-names"));
+    if(!names || !names->getBytesNoCopy() || !names->getLength())return false;
+    return NativeAdrenoBoard::findRegName(
+        static_cast<const uint8_t *>(names->getBytesNoCopy()),names->getLength(),
+        name,index)==kIOReturnSuccess;
 }
 struct NativeAdrenoSmmuWindow {
     volatile uint8_t *base;
@@ -224,30 +261,59 @@ bool NativeAdrenoGpuService::start(IOService *provider)
         IOService::stop(provider);
         return false;
     }
-    if(count<2) {
-        IOLog("NativeAdreno: GPU node needs the register and CX windows\n");
+    const uint32_t chip_id=providerChipId(provider);
+    profile_=NativeAdrenoProfileTable::find(chip_id);
+    if(!profile_) {
+        IOLog("NativeAdreno: qcom,chipid 0x%08x is not a supported profile\n",chip_id);
         IOService::stop(provider);
         return false;
     }
-    for(unsigned index=0;index<2;++index) {
-        IODeviceMemory *memory=getDeviceMemoryWithIndex(index);
-        if(!memory) {
-            IOLog("NativeAdreno: provider window %u has no device memory\n",index);
-            stop(provider);
-            return false;
-        }
-        maps_[index]=OSSharedPtr<IOMemoryMap>(memory->map(kIOMapAnywhere|kIOMapInhibitCache),
-            OSNoRetain);
-        if(!maps_[index]) {
-            IOLog("NativeAdreno: GPU window %u did not map\n",index);
-            stop(provider);
-            return false;
-        }
+    IOLog("NativeAdreno: %s chip=0x%08x GMEM=%uKiB gmu_chip=0x%08x\n",
+        profile_->name,profile_->chip_id,profile_->gmem_bytes>>10,profile_->gmu_chip_id);
+    /* The SM8550 and SM7675 GPU nodes do not list their windows in the same
+     * order or under the same names: SM8550 has gpu, cx_mem; SM7675 has
+     * kgsl_3d0_reg_memory, rscc, cx_dbgc, cx_misc, ... . Select by reg-names
+     * and keep the historical two-window order only when the node has no
+     * names at all. */
+    size_t gpu_index=0,rscc_index=NoWindow,cx_index=NoWindow;
+    const bool gpu_named=windowNamed(provider,"kgsl_3d0_reg_memory",&gpu_index) ||
+        windowNamed(provider,"gpu",&gpu_index);
+    if(windowNamed(provider,"rscc",&rscc_index)) {}
+    if(!windowNamed(provider,"cx_misc",&cx_index)) (void)windowNamed(provider,"cx_mem",&cx_index);
+    if(!gpu_named) {
+        gpu_index=0;
+        if(cx_index==NoWindow)cx_index=1; /* historical layout: gpu, cx */
     }
-    IOLog("NativeAdreno: %lu windows, GPU window at 0x%llx/0x%llx mapped\n",
+    if(gpu_index>=count || cx_index==NoWindow || cx_index>=count) {
+        IOLog("NativeAdreno: GPU node lacks the register or CX window\n");
+        IOService::stop(provider);
+        return false;
+    }
+    if(rscc_index>=count)rscc_index=NoWindow;
+    auto mapWindow=[&](size_t index,unsigned slot)->bool {
+        IODeviceMemory *memory=getDeviceMemoryWithIndex(static_cast<unsigned>(index));
+        if(!memory) {
+            IOLog("NativeAdreno: provider window %lu has no device memory\n",
+                static_cast<unsigned long>(index));
+            return false;
+        }
+        maps_[slot]=OSSharedPtr<IOMemoryMap>(memory->map(kIOMapAnywhere|kIOMapInhibitCache),
+            OSNoRetain);
+        if(!maps_[slot]) {
+            IOLog("NativeAdreno: GPU window %lu did not map\n",static_cast<unsigned long>(index));
+            return false;
+        }
+        return true;
+    };
+    if(!mapWindow(gpu_index,0)) {stop(provider);return false;}
+    if(!mapWindow(cx_index,1)) {stop(provider);return false;}
+    if(rscc_index!=NoWindow && !mapWindow(rscc_index,2)) {stop(provider);return false;}
+    IOLog("NativeAdreno: %lu windows, GPU at 0x%llx/0x%llx, rscc=%d cx=0x%llx\n",
         static_cast<unsigned long>(count),
-        static_cast<unsigned long long>(windows[0].base),
-        static_cast<unsigned long long>(windows[0].bytes));
+        static_cast<unsigned long long>(windows[gpu_index].base),
+        static_cast<unsigned long long>(windows[gpu_index].bytes),
+        rscc_index!=NoWindow?1:0,
+        static_cast<unsigned long long>(windows[cx_index].base));
     /* The GMU node publishes its bases so no DT phandle resolution is needed.
      * Discovery does not imply readiness: bring-up still needs board power,
      * firmware and the SMMU context before any register may be touched. */
@@ -258,23 +324,51 @@ bool NativeAdrenoGpuService::start(IOService *provider)
         NativeAdrenoGmuService *node=OSDynamicCast(NativeAdrenoGmuService,gmu);
         const unsigned published=node?static_cast<unsigned>(node->windowCount()):0;
         IOLog("NativeAdreno: GMU node present with %u windows\n",published);
-        if(node && published>=3) {
-            NativeAdrenoGmuWindow gmu_windows[ShengGmuWindows]{};
-            for(unsigned index=0;index<3;++index) {
-                gmu_windows[index].base=node->windowAddress(index);
-                gmu_windows[index].bytes=static_cast<size_t>(node->windowBytes(index));
+        if(node && published) {
+            size_t gmu_core=0,gmu_pdc=NoWindow,gmu_rscc=NoWindow;
+            if(!windowNamed(gmu,"gmu",&gmu_core))gmu_core=0;
+            if(!windowNamed(gmu,"gmu_pdc",&gmu_pdc))gmu_pdc=published>=3?2:1;
+            (void)windowNamed(gmu,"rscc",&gmu_rscc);
+            if(gmu_rscc>=published)gmu_rscc=NoWindow;
+            /* Historical two-node layout: the GMU node lists gmu, rscc,
+             * gmu_pdc and the GPU node has no rscc entry. */
+            if(gmu_rscc==NoWindow && rscc_index==NoWindow && published>=2)gmu_rscc=1;
+            const bool have_rscc=rscc_index!=NoWindow || gmu_rscc!=NoWindow;
+            if(gmu_core>=published || gmu_pdc>=published || !have_rscc) {
+                IOLog("NativeAdreno: GMU node lacks %s\n",
+                    have_rscc?"the gmu/pdc windows":"the rscc window");
+            } else {
+                NativeAdrenoGmuWindow gmu_windows[ShengGmuWindows]{};
+                gmu_windows[ShengGmuCore].base=node->windowAddress(gmu_core);
+                gmu_windows[ShengGmuCore].bytes=static_cast<size_t>(node->windowBytes(gmu_core));
+                gmu_windows[ShengGmuPdc].base=node->windowAddress(gmu_pdc);
+                gmu_windows[ShengGmuPdc].bytes=static_cast<size_t>(node->windowBytes(gmu_pdc));
+                if(rscc_index!=NoWindow) {
+                    gmu_windows[ShengGmuRscc].base=
+                        reinterpret_cast<volatile uint8_t *>(maps_[2]->getVirtualAddress());
+                    gmu_windows[ShengGmuRscc].bytes=static_cast<size_t>(windows[rscc_index].bytes);
+                } else {
+                    gmu_windows[ShengGmuRscc].base=node->windowAddress(gmu_rscc);
+                    gmu_windows[ShengGmuRscc].bytes=static_cast<size_t>(node->windowBytes(gmu_rscc));
+                }
+                gmu_windows[ShengGmuGpu].base=
+                    reinterpret_cast<volatile uint8_t *>(maps_[0]->getVirtualAddress());
+                gmu_windows[ShengGmuGpu].bytes=static_cast<size_t>(windows[gpu_index].bytes);
+                gmu_windows[ShengGmuCxMisc].base=
+                    reinterpret_cast<volatile uint8_t *>(maps_[1]->getVirtualAddress());
+                gmu_windows[ShengGmuCxMisc].bytes=static_cast<size_t>(windows[cx_index].bytes);
+                if(gmu_platform_.bind(gmu_windows,&gmu_io_)==kIOReturnSuccess) {
+                    gmu_io_bound_=true;
+                    const uint64_t gmu_base=node->windowBase(gmu_core);
+                    const uint64_t gpu_base=windows[gpu_index].base;
+                    const uint32_t delta=gmu_base>gpu_base && gmu_base-gpu_base<=UINT32_MAX?
+                        static_cast<uint32_t>(gmu_base-gpu_base):profile_->gmu_gpu_delta;
+                    NativeAdrenoTimer::setGmuBaseDelta(delta);
+                    IOLog("NativeAdreno: GMU five-window I/O adapter bound, delta=0x%x counter=0x%x\n",
+                        delta,NativeAdrenoTimer::gmuLowOffset());
+                } else
+                    IOLog("NativeAdreno: GMU windows are not usable\n");
             }
-            gmu_windows[ShengGmuGpu].base=
-                reinterpret_cast<volatile uint8_t *>(maps_[0]->getVirtualAddress());
-            gmu_windows[ShengGmuGpu].bytes=static_cast<size_t>(windows[0].bytes);
-            gmu_windows[ShengGmuCxMisc].base=
-                reinterpret_cast<volatile uint8_t *>(maps_[1]->getVirtualAddress());
-            gmu_windows[ShengGmuCxMisc].bytes=static_cast<size_t>(windows[1].bytes);
-            if(gmu_platform_.bind(gmu_windows,&gmu_io_)==kIOReturnSuccess) {
-                gmu_io_bound_=true;
-                IOLog("NativeAdreno: GMU five-window I/O adapter bound\n");
-            } else
-                IOLog("NativeAdreno: GMU windows are not usable\n");
         }
         gmu->release();
     } else {
@@ -311,6 +405,11 @@ bool NativeAdrenoGpuService::start(IOService *provider)
     }
     uint32_t bringup=0;
     if(PE_parse_boot_argn("sheng-gpu-bringup",&bringup,sizeof(bringup)) && bringup) {
+#ifdef SHENG_GMU_CHIP_ID
+        if(profile_->chip_id!=SHENG_GMU_CHIP_ID)
+            IOLog("NativeAdreno: build targets chip 0x%08x, running 0x%08x\n",
+                SHENG_GMU_CHIP_ID,profile_->chip_id);
+#endif
         NativeAdrenoSmmuService *node=OSDynamicCast(NativeAdrenoSmmuService,smmu);
         if(node && node->windowCount() && node->windowAddress(0)) {
             volatile uint8_t *smmu_base=node->windowAddress(0);
@@ -364,10 +463,13 @@ bool NativeAdrenoGpuService::start(IOService *provider)
                         if(checked)
                             IOLog("NativeAdreno: embedded GMU firmware failed validation 0x%x\n",
                                 checked);
+                        else if(profile_->gmu_chip_id!=SHENG_GMU_FW_CHIP_ID)
+                            IOLog("NativeAdreno: GMU firmware chip 0x%08x, profile expects 0x%08x\n",
+                                SHENG_GMU_FW_CHIP_ID,profile_->gmu_chip_id);
                         else {
                             firmware_valid_=true;
-                            IOLog("NativeAdreno: embedded GMU firmware validated (%lu bytes)\n",
-                                static_cast<unsigned long>(firmware_.length));
+                            IOLog("NativeAdreno: embedded GMU firmware validated (%lu bytes, chip 0x%08x)\n",
+                                static_cast<unsigned long>(firmware_.length),SHENG_GMU_FW_CHIP_ID);
                         }
                     } else {
                         IOLog("NativeAdreno: no embedded GMU firmware in this image\n");
@@ -402,11 +504,12 @@ bool NativeAdrenoGpuService::start(IOService *provider)
                                     IOLog("NativeAdreno: command-db refused (%d)\n",parsed);
                                 } else {
 #ifdef NATIVE_ADRENO_HAVE_GMU_VOTES
-                                    inputs.chip_id=SHENG_GMU_VOTES_CHIP_ID;
-                                    inputs.enable_acd=1;
-                                    /* IFPC stays off: the power-up list carries no IFPC restore registers and
-                                     * WPTR writes are not fenced, so a collapse between frames loses CP state. */
-                                    inputs.enable_ifpc=0;
+                                    inputs.chip_id=profile_->chip_id;
+                                    inputs.enable_acd=profile_->acd?1u:0u;
+                                    inputs.enable_ifpc=profile_->ifpc?1u:0u;
+                                    if(inputs.chip_id!=SHENG_GMU_VOTES_CHIP_ID)
+                                        IOLog("NativeAdreno: votes built for chip 0x%08x, running 0x%08x\n",
+                                            SHENG_GMU_VOTES_CHIP_ID,inputs.chip_id);
                                     AdrenoHfiStartupConfig startup{};
                                     ShengGmuConfig config{};
                                     NativeAdrenoGmuTime time{nullptr,
@@ -416,7 +519,7 @@ bool NativeAdrenoGpuService::start(IOService *provider)
                                     if(ShengGmuBuildStartup(&inputs,&startup)!=AdrenoHfiStartupSuccess)
                                         IOLog("NativeAdreno: startup config refused\n");
                                     else if(NativeAdrenoAssembleGmuConfig(&firmware_,&gmu_,
-                                        SHENG_GMU_VOTES_CHIP_ID,1000,&config)!=kIOReturnSuccess)
+                                        profile_->chip_id,1000,&config)!=kIOReturnSuccess)
                                         IOLog("NativeAdreno: GMU config assembly refused\n");
                                     else if(NativeAdrenoGmuPlatform::services(&time,&services))
                                         IOLog("NativeAdreno: GMU services refused\n");
@@ -473,7 +576,7 @@ bool NativeAdrenoGpuService::start(IOService *provider)
                                                 if(!ring_status)ring_status=vm_.map(&pwrup_mem_,1,
                                                     pwrup_iova,3,0,2,&pwrup_map_);
                                                 size_t list_bytes=0;
-                                                if(!ring_status)ring_status=NativeAdrenoPwrupList::buildA740(
+                                                if(!ring_status)ring_status=NativeAdrenoPwrupList::buildA7xx(
                                                     gpu_read32,&cp_window,
                                                     static_cast<uint8_t *>(pwrup_mem_.mapping()),
                                                     0x1000,&list_bytes);
