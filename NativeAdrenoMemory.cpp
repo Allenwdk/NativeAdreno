@@ -3,6 +3,7 @@
 /* Where a call that never returns is stuck: the free/unmap/release path stores a stage number here, the board page shows it. */
 extern "C" {volatile uint32_t native_adreno_trace_stage;}
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOLib.h>
 #include <kern/task.h>
 
@@ -226,6 +227,42 @@ IOReturn NativeAdrenoMemory::importTask(void *task,uint64_t address,size_t bytes
 failed:
     (void)release();return status;
 }
+IOReturn NativeAdrenoMemory::adopt(uint64_t physical,size_t bytes,unsigned bits,size_t budget)
+{
+    if(descriptor_ || imported_ || map_ || spans_ || quarantined_)return kIOReturnBusy;
+    if(!physical || (physical&4095) || !bytes || (bytes&4095) || physical>UINT64_MAX-bytes ||
+        !outputWidth(bits) || !budget || budget>256u*1024u*1024u)return kIOReturnBadArgument;
+    if(bytes>budget)return kIOReturnNoResources;
+    NativeAdrenoCpuState cpu{};
+    IOReturn status=NativeAdrenoQueryCpu4K(&cpu);if(status!=kIOReturnSuccess)return status;
+    const uint64_t limit=UINT64_C(1)<<bits;
+    if(physical>=limit || bytes>limit-physical)return kIOReturnBadArgument;
+    /* The board's reserved GMU pool: IODeviceMemory::withRange wraps memory that already exists at
+     * this physical address (the exact hand-off upstream sheng's GpuPowerProbe does over the
+     * payloads), so nothing here ever asks the VM for pages. */
+    imported_=IODeviceMemory::withRange(physical,bytes);
+    if(!imported_)return kIOReturnNoMemory;
+    status=imported_->prepare();
+    if(status!=kIOReturnSuccess) {imported_->release();imported_=nullptr;return status;}
+    prepared_=true;bytes_=bytes;
+    status=kIOReturnUnsupported;
+    if(imported_->getLength()!=bytes)goto failed;
+    map_=imported_->map(kIOMapAnywhere);
+    if(!map_) {status=kIOReturnNoMemory;goto failed;}
+    mapping_=reinterpret_cast<void *>(static_cast<uintptr_t>(map_->getVirtualAddress()));
+    if(!mapping_ || ((uintptr_t)mapping_&4095))goto failed;
+    span_capacity_=1;
+    spans_=IONewData(NativeAdrenoPhysicalSpan,1);
+    if(!spans_) {status=kIOReturnNoMemory;goto failed;}
+    spans_[0]={0,physical,bytes};span_count_=1;
+    bzero(mapping_,bytes);
+    status=NativeAdrenoMaintainOwnedPages(mapping_,bytes,NativeAdrenoClean);
+    if(status!=kIOReturnSuccess)goto failed;
+    native_adreno_pool_stats[7]=native_adreno_pool_stats[7]+1;
+    return kIOReturnSuccess;
+failed:
+    (void)release();return status;
+}
 IOReturn NativeAdrenoMemory::makeWriteCombined()
 {
     if(!(descriptor_ || pooled_) || imported_ || !prepared_ || quarantined_ || device_references_ || write_combined_ || !mapping_ || !span_count_)
@@ -249,6 +286,7 @@ IOReturn NativeAdrenoMemory::release()
         write_combined_=false;
     }
     if(imported_) {
+        if(map_) {map_->release();map_=nullptr;mapping_=nullptr;}
         if(prepared_) {
             IOReturn status=imported_->complete();
             if(status!=kIOReturnSuccess) {quarantined_=true;return status;}

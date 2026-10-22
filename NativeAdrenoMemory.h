@@ -6,6 +6,7 @@
 #include <stdint.h>
 class IOBufferMemoryDescriptor;
 class IOMemoryDescriptor;
+class IOMemoryMap;
 struct NativeAdrenoPhysicalSpan {uint64_t offset,physical,bytes;};
 struct NativeAdrenoCpuState {
     uint64_t tcr,ttbr0,ttbr1,sctlr;
@@ -34,6 +35,7 @@ IOReturn NativeAdrenoReassertWriteCombined(const NativeAdrenoPhysicalSpan *,size
 class NativeAdrenoMemory final {
     IOBufferMemoryDescriptor *descriptor_=nullptr;
     IOMemoryDescriptor *imported_=nullptr;
+    IOMemoryMap *map_=nullptr;
     bool read_only_=false;
     void *mapping_=nullptr;
     NativeAdrenoPhysicalSpan *spans_=nullptr;
@@ -74,6 +76,12 @@ public:
     IOReturn importTask(void *task,uint64_t address,size_t bytes,unsigned output_bits,size_t byte_budget);
     bool imported() const {return imported_!=nullptr;}
     bool pooled() const {return pooled_;}
+    /* Adopts bytes at an existing physical address (the board's reserved GMU pool) instead of
+     * asking the VM: IODeviceMemory::withRange wraps the range and prepare() wires it, exactly the
+     * hand-off upstream sheng's GpuPowerProbe does over NativeAdrenoGmuContextPayloads. The pool is
+     * reserved from the kernel allocator (UEFI memory map / ADT reserved-memory), so the pages are
+     * here for good and never alias VM allocations. One contiguous span; the CPU mapping is kept. */
+    IOReturn adopt(uint64_t physical,size_t bytes,unsigned output_bits,size_t byte_budget);
     /* An import of memory the owner maps read-only (the kernel could pin it for reading only): the GPU may read it, never write it. */
     bool readOnly() const {return read_only_;}
     /* After allocate(), before any device or client mapping: cleans and invalidates the pages and makes every CPU mapping of them

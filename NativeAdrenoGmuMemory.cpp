@@ -29,20 +29,56 @@ IOReturn NativeAdrenoGmuAllocator::allocate(const NativeAdrenoGmuSizes &sizes,un
         {&hfi_,sizes.hfi,&layout_.hfi_iova,GmuUncachedBase+sizes.dummy+sizes.log},
         {&tables_,sizes.tables,&layout_.tables_iova,0}};
     for(const Selection &selection:selections) {
-        /* The 16 MiB icache is the only large payload. After userland has
-         * wired its pages, uke cannot find 4092 physically contiguous pages
-         * (vm_page_find_contiguous scans the whole zone and fails), while the
-         * GMU's own SMMU translates each page anyway. Allocate the icache
-         * scattered; its CPU mapping is still one contiguous virtual range.
-         * The small payloads and the table pool stay physically contiguous. */
-        const bool contiguous=selection.memory!=&icache_;
         const IOReturn status=selection.memory->allocate(static_cast<size_t>(selection.bytes),
-            address_bits,contiguous,static_cast<size_t>(selection.bytes));
+            address_bits,true,static_cast<size_t>(selection.bytes));
         if(status) {
             (void)releaseAll();
             return status;
         }
         *selection.iova=selection.at;
+    }
+    layout_.tables_bytes=static_cast<size_t>(sizes.tables);
+    layout_.end_iova=GmuDebugIova+sizes.debug;
+    ready_=true;
+    return kIOReturnSuccess;
+}
+IOReturn NativeAdrenoGmuAllocator::adopt(uint64_t base,size_t bytes,const NativeAdrenoGmuSizes &sizes,
+    unsigned address_bits)
+{
+    if(ready_ || icache_.bytes())return kIOReturnBusy;
+    const uint64_t requested[]={sizes.icache,sizes.dummy,sizes.debug,sizes.log,
+        sizes.hfi,sizes.tables};
+    for(uint64_t value:requested)
+        if(!value || (value&(PageBytes-1)) || value>uint64_t(SIZE_MAX))
+            return kIOReturnBadArgument;
+    if(sizes.icache>GmuUncachedBase-GmuIcacheIova ||
+        sizes.dummy+sizes.log+sizes.hfi>GmuDebugIova-GmuUncachedBase ||
+        sizes.debug>GmuApertureBytes-GmuDebugIova)return kIOReturnBadArgument;
+    if(!base || (base&(PageBytes-1)) || base>UINT64_MAX-bytes || !bytes)return kIOReturnBadArgument;
+    /* The payloads lie one after another inside the board's reserved pool, each page aligned, and
+     * every one is wrapped over its existing physical pages (IODeviceMemory::withRange) instead of
+     * being allocated. Same fixed IOVAs as allocate(). */
+    struct Selection {NativeAdrenoMemory *memory;uint64_t bytes;uint64_t *iova;uint64_t at;};
+    const Selection selections[]={
+        {&icache_,sizes.icache,&layout_.icache_iova,GmuIcacheIova},
+        {&dummy_,sizes.dummy,&layout_.dummy_iova,GmuUncachedBase},
+        {&debug_,sizes.debug,&layout_.debug_iova,GmuDebugIova},
+        {&log_,sizes.log,&layout_.log_iova,GmuUncachedBase+sizes.dummy},
+        {&hfi_,sizes.hfi,&layout_.hfi_iova,GmuUncachedBase+sizes.dummy+sizes.log},
+        {&tables_,sizes.tables,&layout_.tables_iova,0}};
+    uint64_t used=0;
+    for(const Selection &selection:selections)used+=selection.bytes;
+    if(used>bytes)return kIOReturnNoResources;
+    uint64_t at=base;
+    for(const Selection &selection:selections) {
+        const IOReturn status=selection.memory->adopt(at,static_cast<size_t>(selection.bytes),
+            address_bits,static_cast<size_t>(selection.bytes));
+        if(status) {
+            (void)releaseAll();
+            return status;
+        }
+        *selection.iova=selection.at;
+        at+=selection.bytes;
     }
     layout_.tables_bytes=static_cast<size_t>(sizes.tables);
     layout_.end_iova=GmuDebugIova+sizes.debug;
