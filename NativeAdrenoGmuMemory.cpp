@@ -29,8 +29,15 @@ IOReturn NativeAdrenoGmuAllocator::allocate(const NativeAdrenoGmuSizes &sizes,un
         {&hfi_,sizes.hfi,&layout_.hfi_iova,GmuUncachedBase+sizes.dummy+sizes.log},
         {&tables_,sizes.tables,&layout_.tables_iova,0}};
     for(const Selection &selection:selections) {
+        /* The 16 MiB icache is the only large payload. After userland has
+         * wired its pages, uke cannot find 4092 physically contiguous pages
+         * (vm_page_find_contiguous scans the whole zone and fails), while the
+         * GMU's own SMMU translates each page anyway. Allocate the icache
+         * scattered; its CPU mapping is still one contiguous virtual range.
+         * The small payloads and the table pool stay physically contiguous. */
+        const bool contiguous=selection.memory!=&icache_;
         const IOReturn status=selection.memory->allocate(static_cast<size_t>(selection.bytes),
-            address_bits,true,static_cast<size_t>(selection.bytes));
+            address_bits,contiguous,static_cast<size_t>(selection.bytes));
         if(status) {
             (void)releaseAll();
             return status;

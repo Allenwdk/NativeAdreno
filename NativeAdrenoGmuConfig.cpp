@@ -8,7 +8,9 @@ enum : uint64_t {
 static bool matches(const NativeAdrenoMemory &memory,uint64_t bytes,uint64_t iova,
     ShengGmuMemory *out)
 {
-    if(!memory.mapping() || memory.bytes()!=size_t(bytes) || memory.spanCount()!=1)
+    /* The CPU view is one contiguous virtual range even when the icache's
+     * physical pages are scattered; the GMU's SMMU context maps every span. */
+    if(!memory.mapping() || memory.bytes()!=size_t(bytes))
         return false;
     out->cpu=static_cast<volatile uint32_t *>(memory.mapping());
     out->bytes=size_t(bytes);
