@@ -41,6 +41,12 @@ public:
     /* Every size must be a nonzero 4KiB multiple and fit its fixed range. Every page lies below
      * 2^address_bits: the SMMU output size (ID2.OAS) the context will use. */
     IOReturn allocate(const NativeAdrenoGmuSizes &sizes,unsigned address_bits=40);
+    /* The upstream hand-off shape: the payloads are carved out of the board's reserved GMU pool and
+     * each wrapped with IODeviceMemory::withRange (memory that already exists at a physical address),
+     * so nothing here asks XNU's VM for pages. The pool is one contiguous reserved region (a
+     * reserved-memory node in the ADT and a reserved entry in the UEFI memory map, as the panic pram
+     * is); base/bytes come from the board constants. Layout and IOVAs are exactly allocate()'s. */
+    IOReturn adopt(uint64_t base,size_t bytes,const NativeAdrenoGmuSizes &sizes,unsigned address_bits=40);
     /* Map every payload into the VM's lower region at its assigned IOVA with
      * read/write access (icache also privileged and executable). The VM must already be attached with a lower arena
      * covering the reservation. Handles are retained for unmapFrom. */

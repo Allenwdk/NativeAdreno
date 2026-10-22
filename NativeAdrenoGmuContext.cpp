@@ -2,6 +2,9 @@
 #include "NativeAdrenoGmuContext.h"
 #include "ArmSmmu4KMmio.h"
 #include <IOKit/IOLib.h>
+#if __has_include("ShengGmuSource.h")
+#include "ShengGmuSource.h"
+#endif
 
 static void readBack(const ArmSmmu4KIo *io,const ArmSmmu4KProgramResult *program,unsigned bank,
     unsigned slot,NativeAdrenoGmuContextReport *r)
@@ -36,7 +39,17 @@ IOReturn NativeAdrenoGmuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
         if(report->output_bits>40)report->output_bits=40;
         if(!report->output_bits)status=kIOReturnUnsupported;
     }
-    if(!status)status=gmu_.allocate(NativeAdrenoGmuDefaultSizes(TablePages*0x1000),report->output_bits);
+    if(!status) {
+        /* Prefer the board's reserved GMU pool (withRange over existing physical pages, the upstream
+         * sheng hand-off) and only fall back to the VM when the board publishes no pool. */
+#if defined(SHENG_GMU_POOL_BASE) && defined(SHENG_GMU_POOL_BYTES)
+        status=gmu_.adopt(SHENG_GMU_POOL_BASE,SHENG_GMU_POOL_BYTES,
+            NativeAdrenoGmuDefaultSizes(TablePages*0x1000),report->output_bits);
+#else
+        status=kIOReturnNotFound;
+#endif
+        if(status)status=gmu_.allocate(NativeAdrenoGmuDefaultSizes(TablePages*0x1000),report->output_bits);
+    }
     if(!status) {
         step(Prepare);
         status=smmu_.prepare(&gmu_.tables(),0,0,GmuApertureBytes,NativeAdrenoSmmuContext::MaxLeaves,
