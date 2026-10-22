@@ -134,7 +134,30 @@ IOReturn NativeAdrenoUserClient::query(NativeAdrenoAbiParams *params)
     params->flags=NativeAdrenoParamsHostImport;params->max_bo_bytes=UINT64_C(1)<<NativeAdrenoAbiMaxBoBytesShift;
     return kIOReturnSuccess;
 }
+/* Per client slot (4, the kernel's own client last): [0] live objects now, [1] their peak, [2] refused BoAllocs, [3] last refusal status,
+ * [4] bytes of the last refused request, [5] the window's highest mapped end in MiB above its start. Turnip turns any refusal into
+ * VK_ERROR_OUT_OF_DEVICE_MEMORY, which its command streams do not check (int-237: backboardd wrote through a NULL stream pointer). */
+extern "C" {volatile uint32_t native_adreno_client_stats[5][6];}
+static volatile uint32_t *clientStats(uint32_t queue_base,uint64_t window_bytes) {
+    const uint32_t slot=window_bytes?queue_base/NativeAdrenoAbiMaxQueues:4;
+    return native_adreno_client_stats[slot<4?slot:4];
+}
+static void noteLive(uint32_t queue_base,uint64_t window_bytes,size_t live) {
+    volatile uint32_t *stats=clientStats(queue_base,window_bytes);
+    stats[0]=(uint32_t)live;if(live>stats[1])stats[1]=(uint32_t)live;
+}
 IOReturn NativeAdrenoUserClient::allocBo(const NativeAdrenoAbiBoAlloc *request,
+    NativeAdrenoAbiBoAllocReply *reply)
+{
+    const IOReturn status=allocBoInner(request,reply);
+    if(status && request) {
+        volatile uint32_t *stats=clientStats(queue_base_,window_bytes_);
+        stats[2]=stats[2]+1;stats[3]=(uint32_t)status;stats[4]=(uint32_t)request->bytes;
+    }
+    if(entries_)noteLive(queue_base_,window_bytes_,liveObjects());
+    return status;
+}
+IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *request,
     NativeAdrenoAbiBoAllocReply *reply)
 {
     if(!request || !reply)return kIOReturnBadArgument;reply->handle=0;
@@ -234,6 +257,7 @@ IOReturn NativeAdrenoUserClient::mapBo(const NativeAdrenoAbiBoMap *request,
     if(status)return status;
     entry->mapped=handle;entry->iova=request->iova;entry->mapped_state=true;
     if(end>window_peak_)window_peak_=end;
+    if(window_bytes_ && window_peak_>window_start_)clientStats(queue_base_,window_bytes_)[5]=(uint32_t)((window_peak_-window_start_)>>20);
     reply->iova=request->iova;
     return kIOReturnSuccess;
 }

@@ -13,7 +13,7 @@
  * pointer values. A mapping is retirable only through freeBo, which unmaps
  * first and then releases the backing object; both steps must succeed.
  * Up to NativeAdrenoClientMaxObjects live objects and the execbuf's own eight-job limit apply. */
-enum : size_t {NativeAdrenoClientMaxObjects=1024,NativeAdrenoClientContiguousFirstBytes=65536};
+enum : size_t {NativeAdrenoClientMaxObjects=4096,NativeAdrenoClientContiguousFirstBytes=65536};
 class NativeAdrenoUserClient final {
     struct Queue {uint32_t id=0;bool active=false;};
     struct Entry {
@@ -80,6 +80,7 @@ public:
     uint32_t mappingLeases(uint32_t token) const;
     IOReturn query(NativeAdrenoAbiParams *);
     IOReturn allocBo(const NativeAdrenoAbiBoAlloc *,NativeAdrenoAbiBoAllocReply *);
+    IOReturn allocBoInner(const NativeAdrenoAbiBoAlloc *,NativeAdrenoAbiBoAllocReply *);
     IOReturn mapBo(const NativeAdrenoAbiBoMap *,NativeAdrenoAbiBoMapReply *);
     /* BoImport: pins the caller's pages. Only the IOKit wrapper can call it, with the calling task; dispatch() refuses the method
      * because it has no task (the kernel mailbox path cannot import). */
