@@ -14,8 +14,8 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
     if(!report)return kIOReturnBadArgument;
     *report={};
     if(used_)return kIOReturnBusy;
-    if(!io || !slots || !sids || bank>63 || !asid || asid>0xffff || slots[0]>127 || slots[1]>127 ||
-        slots[0]==slots[1])return kIOReturnBadArgument;
+    if(!io || !slots || !sids || bank>63 || !asid || asid>0xffff || slots[0]>127 ||
+        (sids[1]!=0xffff && (slots[1]>127 || slots[0]==slots[1])))return kIOReturnBadArgument;
     used_=true;
     IOReturn status=kIOReturnSuccess;
     auto step=[&](Step s) {report->step=s;if(progress)progress(s);};
@@ -59,8 +59,11 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
     }
     if(!status) {
         step(Attach);
+        /* sid1 == 0xffff: attach the user stream only (int-158: the secure SID's SMR write takes a
+         * synchronous external abort in this non-secure VM, right after its S2CR write succeeded). */
+        const unsigned routes_n=sids[1]==0xffff?1u:2u;
         const ArmSmmu4KStream routes[2]={{slots[0],sids[0]},{slots[1],sids[1]}};
-        status=smmu_.attach(routes,2);
+        status=smmu_.attach(routes,routes_n);
         const ArmSmmu4KStreamResult *s=smmu_.streamResult();
         report->route_status=smmu_.attachStatus();
         report->route_phase=s->phase;report->route_writes=s->writes;report->routes_verified=s->streams_verified;
