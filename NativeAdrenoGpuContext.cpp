@@ -2,6 +2,9 @@
 #include "NativeAdrenoGpuContext.h"
 #include "ArmSmmu4KMmio.h"
 #include <IOKit/IOLib.h>
+#if __has_include("ShengGmuSource.h")
+#include "ShengGmuSource.h"
+#endif
 
 extern "C" volatile uint32_t native_adreno_pool_mib;
 extern "C" volatile uint32_t native_adreno_pool_stats[8],native_adreno_pool_status;
@@ -39,6 +42,30 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
         /* Not fatal: without it each pooled BO changes its pages' attribute itself, as a scattered one does. */
         if(native_adreno_wc_enabled && NativeAdrenoMemory::poolBytes())native_adreno_pool_wc=(uint32_t)NativeAdrenoMemory::writeCombinePool()|1u<<31;
     }
+#if defined(SHENG_GPU_POOL_BASE) && defined(SHENG_GPU_POOL_BYTES)
+    /* The tail of the board's reserved pool: adopt the GPU context's table pool and SQE/ring buffers
+     * over existing physical pages, exactly as the GMU payloads are adopted. A 1027-page contiguous
+     * VM allocation fails once userland has wired memory (int-159: st=2bd at step 1), while the
+     * reserved range is always there. */
+    if(!status) {
+        uint64_t at=SHENG_GPU_POOL_BASE;
+        status=tables_.adopt(at,TablePages*0x1000,report->output_bits,TablePages*0x1000);
+        if(!status)at+=TablePages*0x1000;
+        for(unsigned i=0;!status && i<GpuBufferCount;++i) {
+            if(at>SHENG_GPU_POOL_BASE+SHENG_GPU_POOL_BYTES || kBytes[i]>SHENG_GPU_POOL_BASE+SHENG_GPU_POOL_BYTES-at) {
+                status=kIOReturnNoResources;break;
+            }
+            status=buffers_[i].adopt(at,kBytes[i],report->output_bits,kBytes[i]);
+            if(!status)at+=kBytes[i];
+        }
+        if(status) {
+            /* Refused adopt: give the pool back and let the VM allocator below try. */
+            for(unsigned i=0;i<GpuBufferCount;++i)if(buffers_[i].backed())(void)buffers_[i].release();
+            if(tables_.backed())(void)tables_.release();
+            status=kIOReturnSuccess;
+        }
+    }
+#endif
     if(!status)status=tables_.allocate(TablePages*0x1000,report->output_bits,true,TablePages*0x1000);
     for(unsigned i=0;!status && i<GpuBufferCount;++i)
         status=buffers_[i].allocate(kBytes[i],report->output_bits,true,kBytes[i]);
