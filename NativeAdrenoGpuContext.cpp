@@ -42,6 +42,7 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
         /* Not fatal: without it each pooled BO changes its pages' attribute itself, as a scattered one does. */
         if(native_adreno_wc_enabled && NativeAdrenoMemory::poolBytes())native_adreno_pool_wc=(uint32_t)NativeAdrenoMemory::writeCombinePool()|1u<<31;
     }
+    bool adopted_pool=false;
 #if defined(SHENG_GPU_POOL_BASE) && defined(SHENG_GPU_POOL_BYTES)
     /* The tail of the board's reserved pool: adopt the GPU context's table pool and SQE/ring buffers
      * over existing physical pages, exactly as the GMU payloads are adopted. A 1027-page contiguous
@@ -50,25 +51,29 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
     if(!status) {
         uint64_t at=SHENG_GPU_POOL_BASE;
         status=tables_.adopt(at,TablePages*0x1000,report->output_bits,TablePages*0x1000);
+        IOLog("NativeAdreno: gpu pool tables %x at %llx\n",(unsigned)status,(unsigned long long)at);
         if(!status)at+=TablePages*0x1000;
         for(unsigned i=0;!status && i<GpuBufferCount;++i) {
             if(at>SHENG_GPU_POOL_BASE+SHENG_GPU_POOL_BYTES || kBytes[i]>SHENG_GPU_POOL_BASE+SHENG_GPU_POOL_BYTES-at) {
                 status=kIOReturnNoResources;break;
             }
             status=buffers_[i].adopt(at,kBytes[i],report->output_bits,kBytes[i]);
+            if(status)IOLog("NativeAdreno: gpu pool buffer %u %x at %llx\n",i,(unsigned)status,(unsigned long long)at);
             if(!status)at+=kBytes[i];
         }
         if(status) {
             /* Refused adopt: give the pool back and let the VM allocator below try. */
             for(unsigned i=0;i<GpuBufferCount;++i)if(buffers_[i].backed())(void)buffers_[i].release();
             if(tables_.backed())(void)tables_.release();
+            IOLog("NativeAdreno: gpu pool fallback after %x (tables backed=%u)\n",(unsigned)status,tables_.backed()?1u:0u);
             status=kIOReturnSuccess;
-        }
+        } else adopted_pool=true;
     }
 #endif
-    if(!status)status=tables_.allocate(TablePages*0x1000,report->output_bits,true,TablePages*0x1000);
-    for(unsigned i=0;!status && i<GpuBufferCount;++i)
+    if(!status && !adopted_pool)status=tables_.allocate(TablePages*0x1000,report->output_bits,true,TablePages*0x1000);
+    for(unsigned i=0;!status && !adopted_pool && i<GpuBufferCount;++i)
         status=buffers_[i].allocate(kBytes[i],report->output_bits,true,kBytes[i]);
+    if(status)IOLog("NativeAdreno: gpu context alloc failed %x\n",(unsigned)status);
     if(!status) {
         step(Prepare);
         status=smmu_.prepare(&tables_,0,0,GpuApertureBytes,NativeAdrenoSmmuContext::MaxLeaves,
