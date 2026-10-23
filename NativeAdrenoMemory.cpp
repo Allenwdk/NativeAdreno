@@ -246,7 +246,11 @@ IOReturn NativeAdrenoMemory::adopt(uint64_t physical,size_t bytes,unsigned bits,
     prepared_=true;bytes_=bytes;
     status=kIOReturnUnsupported;
     if(imported_->getLength()!=bytes)goto failed;
-    map_=imported_->map(kIOMapAnywhere);
+    /* Write-combined, as sheng's GpuPowerProbe maps the same payload hand-off: outside the kernel's
+     * DRAM the mapping is not cacheable, so DC ZVA in bzero and cache maintenance by VA are not
+     * defined for it (a device-map bzero faults with an alignment abort, int-155). Zero with stores
+     * and leave maintenance out: non-cacheable CPU writes are already visible to the SMMU. */
+    map_=imported_->map(kIOMapAnywhere|kIOMapWriteCombineCache);
     if(!map_) {status=kIOReturnNoMemory;goto failed;}
     mapping_=reinterpret_cast<void *>(static_cast<uintptr_t>(map_->getVirtualAddress()));
     if(!mapping_ || ((uintptr_t)mapping_&4095))goto failed;
@@ -254,9 +258,10 @@ IOReturn NativeAdrenoMemory::adopt(uint64_t physical,size_t bytes,unsigned bits,
     spans_=IONewData(NativeAdrenoPhysicalSpan,1);
     if(!spans_) {status=kIOReturnNoMemory;goto failed;}
     spans_[0]={0,physical,bytes};span_count_=1;
-    bzero(mapping_,bytes);
-    status=NativeAdrenoMaintainOwnedPages(mapping_,bytes,NativeAdrenoClean);
-    if(status!=kIOReturnSuccess)goto failed;
+    {
+        volatile uint64_t *words=static_cast<volatile uint64_t *>(mapping_);
+        for(size_t at=0;at<bytes/sizeof(uint64_t);++at)words[at]=0;
+    }
     native_adreno_pool_stats[7]=native_adreno_pool_stats[7]+1;
     return kIOReturnSuccess;
 failed:
