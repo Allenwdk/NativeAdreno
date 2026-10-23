@@ -495,7 +495,10 @@ bool NativeAdrenoGpuService::start(IOService *provider)
 #ifdef NATIVE_ADRENO_HAVE_GMU_VOTES
                                     inputs.chip_id=profile_->chip_id;
                                     inputs.enable_acd=profile_->acd?1u:0u;
-                                    inputs.enable_ifpc=profile_->ifpc?1u:0u;
+                                    /* IFPC stays off (upstream fix): the power-up list carries no IFPC
+                                     * restore registers and WPTR writes are not fenced, so a collapse
+                                     * between frames loses CP state. */
+                                    inputs.enable_ifpc=0;
                                     if(inputs.chip_id!=SHENG_GMU_VOTES_CHIP_ID)
                                         IOLog("NativeAdreno: votes built for chip 0x%08x, running 0x%08x\n",
                                             SHENG_GMU_VOTES_CHIP_ID,inputs.chip_id);

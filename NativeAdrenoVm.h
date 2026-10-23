@@ -26,7 +26,9 @@ struct NativeAdrenoVmResult {
  * only the owned streams. Uncertain resources require independent real reset.
  * No VM may be advertised to apps until per-client isolation, submission
  * validation/protection, genuine IRQ fences and reset are implemented. */
-enum : size_t {NativeAdrenoVmMaxObjects=1024};
+/* One table for every client's mappings: 1024 filled up once the render server primed its shaders (int-237: BoMap refused with
+ * kIOReturnNoResources at objects=1024, Turnip wrote through a NULL command stream and backboardd crashed). */
+enum : size_t {NativeAdrenoVmMaxObjects=4096};
 /* Board hook for sampleWord(): reads one aligned word of physical memory through a fresh uncached mapping; 0 on success. */
 extern "C" int (*native_adreno_dram_read32)(uint64_t physical,uint32_t *value);
 /* The board's reader through the kernel's cacheable physical aperture (null on the host: the BO's own mapping is read). */
