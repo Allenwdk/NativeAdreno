@@ -170,10 +170,11 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
         IOReturn audited=vm_->reassertWriteCombined(&reset);
         native_adreno_wc_audit[5]=native_adreno_wc_audit[5]+reset;
         uint32_t lines=0,dirty=0,stale=0;size_t budget=SubmitAuditBytes;
-        /* The re-assertion above is the correction and runs every time; the audit only detects, and found no dirty line in int-141's
-         * 133798, so after the first 16 submissions it compares every eighth one's IBs (it cost about 2 ms each). */
+        /* The re-assertion above is the correction and runs every time; the audit only detects. It found no dirty line in int-141's
+         * 133798 nor in i566's 2765132 (1358 audits of every eighth submission, about 2 ms each under the publish lock, so every eighth
+         * frame of every client waited), so only the first 16 submissions are compared now. */
         ++audit_tick_;
-        const bool audit_now=audit_tick_<=16 || (audit_tick_&7)==1;
+        const bool audit_now=audit_tick_<=16;
         if(!audit_now)budget=0;
         for(size_t i=0;i<count && budget && !audited;++i) {   /* a failed re-assertion skips the audit and ends the trust */
             const size_t bytes=buffers[i].bytes<budget?(size_t)buffers[i].bytes:budget;
@@ -191,9 +192,13 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
             native_adreno_wc_distrusted=native_adreno_coherence[0]+1;
         }
     }
-    (void)vm_->sampleWord(buffers[0].iova,&cached,&before);
+    /* The coherence sample reads the first IB's word through a fresh uncached mapping before and after the publication: every 64th
+     * submission only (two such mappings per submission were CPU time on every frame). */
+    static uint32_t coherence_turn;
+    const bool sample=!(coherence_turn++&63);
+    if(sample)(void)vm_->sampleWord(buffers[0].iova,&cached,&before);
     IOReturn status=vm_->publishMapped();
-    if(!status) {
+    if(!status && sample) {
         (void)vm_->sampleWord(buffers[0].iova,&ignored,&after);
         native_adreno_coherence[0]=native_adreno_coherence[0]+1;
         native_adreno_coherence[1]=cached;native_adreno_coherence[2]=before;native_adreno_coherence[3]=after;
@@ -203,8 +208,10 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
             }
             native_adreno_coherence[4]=native_adreno_coherence[4]+1;
         }
-        status=vm_->invalidateTlb();
     }
+    /* No TLB invalidation before a submission: a map fills only invalid leaves (no TLB holds an invalid descriptor), an unmap drops
+     * its own pages before it returns, and the tables above the leaves never change. The TLBIALL here emptied the GPU's TLB on every
+     * submission (10944 in i568), so each frame began with page walks. A stalled fence still invalidates (below). */
     if(status) {
         for(size_t i=0;i<handle_count;++i) {vm_->retireJobAfterCompletion(handles[i]);++stats_.references_retired;}
         return status;
