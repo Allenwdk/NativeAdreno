@@ -5,6 +5,7 @@
 #include "NativeAdrenoSubmit.h"
 #include "NativeAdrenoTimer.h"
 #include "NativeAdrenoStatus.h"
+#include "NativeAdrenoHandleIndex.h"
 
 /* Kernel-side body of the Adreno user client, deliberately free of IOKit so it
  * can be exercised on a host. The future IOService/IOUserClient wrapper only
@@ -13,7 +14,8 @@
  * pointer values. A mapping is retirable only through freeBo, which unmaps
  * first and then releases the backing object; both steps must succeed.
  * Up to NativeAdrenoClientMaxObjects live objects and the execbuf's own eight-job limit apply. */
-enum : size_t {NativeAdrenoClientMaxObjects=4096,NativeAdrenoClientContiguousFirstBytes=65536};
+/* As many objects as the shared VM table can hold (NativeAdrenoVmMaxObjects; i567: backboardd crashed twice at 4096). */
+enum : size_t {NativeAdrenoClientMaxObjects=16384,NativeAdrenoClientContiguousFirstBytes=65536};
 class NativeAdrenoUserClient final {
     struct Queue {uint32_t id=0;bool active=false;};
     struct Entry {
@@ -33,6 +35,8 @@ class NativeAdrenoUserClient final {
     /* Allocated at open(), all-zero is the free state. */
     Entry *entries_=nullptr;
     size_t entry_count_=0;
+    NativeAdrenoHandleIndex<NativeAdrenoClientMaxObjects> index_;   /* live handle -> its entries_ index */
+    size_t free_hint_=0,live_=0;   /* no free entry below free_hint_; live_ entries are used */
     Queue queues_[NativeAdrenoAbiMaxQueues]{};
     NativeAdrenoVm *vm_=nullptr;
     NativeAdrenoSubmit *submit_=nullptr;
@@ -56,7 +60,8 @@ class NativeAdrenoUserClient final {
     bool open_=false;
     Entry *find(uint64_t);
     Entry *free();
-    static void clear(Entry &);
+    void clear(Entry &);
+    void publish(Entry &);
 public:
     NativeAdrenoUserClient()=default;
     ~NativeAdrenoUserClient()=default;
