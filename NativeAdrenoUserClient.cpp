@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "NativeAdrenoUserClient.h"
+#include <IOKit/IOLib.h>
+#include <kern/thread.h>
 extern "C" volatile uint32_t native_adreno_trace_stage;
 /* 0 keeps user BOs cacheable and maintained before every submission (int-070..097); the board sets it from the sheng-gpu-wc boot argument. */
 extern "C" {volatile uint32_t native_adreno_wc_enabled=1;}
@@ -58,6 +60,50 @@ NativeAdrenoUserClient::Entry *NativeAdrenoUserClient::free()
 {
     for(size_t i=free_hint_;i<entry_count_;++i)if(!entries_[i].used) {free_hint_=i;return &entries_[i];}
     return nullptr;
+}
+/* A closing client's BOs are not returned to the VM inline: clientClose runs before the task's pmap is destroyed, and a page freed then
+ * still has the task's user PTE (pmap_assert_free, the mapping in a pmap whose proc is already gone). The backing stores are queued here
+ * and released after eight one-second ticks, by which point the pmap teardown has run. A failed release (the GPU still references it) is
+ * retried; the memory object is never used again. */
+namespace {
+struct RetiredMemory {NativeAdrenoMemory memory; uint32_t ticks; RetiredMemory *next;};
+IOLock *gRetiredLock=nullptr;
+RetiredMemory *gRetired=nullptr;
+volatile uint32_t native_adreno_deferred_bo=0;
+void retiredReaper(void *,wait_result_t) {
+    for(;;) {
+        IOSleep(1000);
+        RetiredMemory *ready=nullptr;
+        if(gRetiredLock)IOLockLock(gRetiredLock);
+        RetiredMemory **at=&gRetired;
+        while(*at) {
+            RetiredMemory *node=*at;
+            if(node->ticks && --node->ticks==0) {*at=node->next;node->next=ready;ready=node;}
+            else at=&node->next;
+        }
+        if(gRetiredLock)IOLockUnlock(gRetiredLock);
+        while(ready) {
+            RetiredMemory *node=ready;ready=ready->next;
+            const IOReturn status=node->memory.release();
+            if(status) {node->ticks=5;if(gRetiredLock)IOLockLock(gRetiredLock);node->next=gRetired;gRetired=node;if(gRetiredLock)IOLockUnlock(gRetiredLock);}
+            else IODelete(node,RetiredMemory,1);
+        }
+    }
+}
+void retireMemory(NativeAdrenoMemory &&memory) {
+    if(!gRetiredLock) {
+        gRetiredLock=IOLockAlloc();
+        thread_t thread=nullptr;
+        if(gRetiredLock && kernel_thread_start(retiredReaper,nullptr,&thread)==KERN_SUCCESS) thread_deallocate(thread);
+    }
+    RetiredMemory *node=IONewZero(RetiredMemory,1);
+    if(!node) {memory.quarantine();return;}      /* no reaper slot: keep the pages, never free them under a PTE */
+    node->memory=static_cast<NativeAdrenoMemory &&>(memory);
+    node->ticks=8;
+    if(!gRetiredLock) {node->memory.quarantine();return;}
+    IOLockLock(gRetiredLock);node->next=gRetired;gRetired=node;IOLockUnlock(gRetiredLock);
+    native_adreno_deferred_bo=native_adreno_deferred_bo+1;
+}
 }
 size_t NativeAdrenoUserClient::liveObjects() const
 {
@@ -128,9 +174,20 @@ IOReturn NativeAdrenoUserClient::releaseAll(const NativeAdrenoRingClock *clock,u
         Entry &entry=entries_[index];
         if(!entry.used)continue;
         entry.mapping_leases=0;
-        NativeAdrenoAbiBoFree request{entry.handle};
-        status=freeBo(&request);
-        if(status)return status;
+        /* The GPU mapping must go before the pages rest; the release of the backing store itself is deferred past the caller's
+         * pmap teardown (see retireMemory). */
+        if(entry.mapped_state) {
+            submit_->retireCompleted();
+            status=vm_->unmap(entry.mapped);
+            if(status)return status;
+            entry.mapped_state=false;entry.mapped=0;entry.iova=0;
+        }
+        if(entry.imported) {
+            if(native_adreno_import_live[0])native_adreno_import_live[0]=native_adreno_import_live[0]-1;
+            noteImportState(entry.handle,2);
+        }
+        retireMemory(static_cast<NativeAdrenoMemory &&>(entry.memory));
+        clear(entry);
     }
     for(size_t i=1;i<NativeAdrenoAbiMaxQueues;++i)queues_[i]=Queue{};
     return close();
@@ -139,13 +196,22 @@ NativeAdrenoMemory *NativeAdrenoUserClient::memoryForToken(uint32_t token)
 {
     if(!open_ || !token || token>entry_count_)return nullptr;
     Entry &entry=entries_[token-1];
-    return entry.used && !entry.unreleasable && entry.token==token && entry.mapping_leases?&entry.memory:nullptr;
+    return entry.used && !entry.unreleasable && !entry.freeing && entry.token==token && entry.mapping_leases?&entry.memory:nullptr;
 }
 uint32_t NativeAdrenoUserClient::mappingLeases(uint32_t token) const
 {
     if(!open_ || !token || token>entry_count_)return 0;
     const Entry &entry=entries_[token-1];
     return entry.used && entry.token==token?entry.mapping_leases:0;
+}
+uint32_t NativeAdrenoUserClient::tokenForHandle(uint64_t handle) const
+{
+    if(!open_ || !handle)return 0;
+    for(size_t i=0;i<entry_count_;++i) {
+        const Entry &entry=entries_[i];
+        if(entry.used && entry.handle==handle)return entry.token;
+    }
+    return 0;
 }
 IOReturn NativeAdrenoUserClient::query(NativeAdrenoAbiParams *params)
 {

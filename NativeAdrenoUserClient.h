@@ -27,6 +27,9 @@ class NativeAdrenoUserClient final {
         bool mapped_state=false;
         bool unreleasable=false;
         bool imported=false;
+        /* BoFree is in progress: clientMemoryForType must not hand out a new view for this token, or the mapping could be
+         * created after the wrapper dropped the old views and the pages would be freed under a live user PTE. */
+        bool freeing=false;
         uint32_t metadata_bytes=0;
         uint32_t token=0;
         uint32_t mapping_leases=0;
@@ -87,6 +90,11 @@ public:
     NativeAdrenoMemory *memoryForToken(uint32_t token);
     /* CPU mappings of the BO of this token that BoCpuMap handed out and BoCpuUnmap has not given back; 0 for no such BO. */
     uint32_t mappingLeases(uint32_t token) const;
+    /* Token of a live handle, so the IOKit wrapper can tear down that BO's user views before BoFree releases its pages. */
+    uint32_t tokenForHandle(uint64_t handle) const;
+    /* Mark the BO of handle as being freed so no new user view can be created for it; endFree clears the mark when freeBo fails. */
+    bool beginFree(uint64_t handle);
+    void endFree(uint64_t handle);
     IOReturn query(NativeAdrenoAbiParams *);
     IOReturn allocBo(const NativeAdrenoAbiBoAlloc *,NativeAdrenoAbiBoAllocReply *);
     IOReturn allocBoInner(const NativeAdrenoAbiBoAlloc *,NativeAdrenoAbiBoAllocReply *);

@@ -165,6 +165,9 @@ class AGXDeviceUserClient : public IOUserClient {
     View *viewSlot(uint32_t token) {return views_ && token && token<=MaxViews?&views_[token-1]:nullptr;}
     View *views_=nullptr;   /* on the heap: 1024 entries would make the client object too big for the kernel allocator's fixed-size classes */
     void dropViews(uint32_t token);
+    /* The same while the caller already holds g.lock: clientClose keeps the lock across dropping the views and releaseAll,
+     * so a client thread cannot create a new view (and lease) between the two and have its pages freed under it. */
+    void dropViewsLocked(uint32_t token);
     static IOReturn action(OSObject *target,void *reference,IOExternalMethodArguments *arguments);
     IOReturn run(uint32_t method,const void *input,size_t input_size,void *output,size_t output_size);
 public:
@@ -274,24 +277,30 @@ bool AGXDeviceUserClient::mount(bool kernel)
 }
 /* Removes the cached view(s) of token (0 = all) and tears down every user mapping of them, so the BO's pages are never freed while a user
  * PTE still points at them, whether or not the client unmapped. */
-void AGXDeviceUserClient::dropViews(uint32_t token)
+void AGXDeviceUserClient::dropViewsLocked(uint32_t token)
 {
     for(;;) {
         IOMemoryDescriptor *view=nullptr;
-        IOLockLock(g.lock);
         if(token) {View *v=viewSlot(token);if(v && v->descriptor && v->token==token) {view=v->descriptor;v->descriptor=nullptr;v->token=0;}}
         else if(views_)for(size_t i=0;i<MaxViews;++i) {View &v=views_[i];if(v.descriptor) {view=v.descriptor;v.descriptor=nullptr;v.token=0;break;}}
-        IOLockUnlock(g.lock);
         if(!view)return;
         /* The returned reference is the last one outside the descriptor's own list: dropping it frees the map, which unmaps the user range. */
         while(removeMappingForDescriptor(view))native_adreno_metal_diag.forced_unmaps=native_adreno_metal_diag.forced_unmaps+1;
         view->release();
     }
 }
+void AGXDeviceUserClient::dropViews(uint32_t token)
+{
+    IOLockLock(g.lock);
+    dropViewsLocked(token);
+    IOLockUnlock(g.lock);
+}
 IOReturn AGXDeviceUserClient::clientClose()
 {
-    dropViews(0);
     IOLockLock(g.lock);
+    /* Under the same lock releaseAll takes: a client thread that is still mapping cannot create a view (and lease) between
+     * the teardown of the old views and the free of the BOs, which is how a corpse's pmap kept a PTE over freed pages. */
+    dropViewsLocked(0);
     IOReturn status=kIOReturnSuccess;
     AGXDeviceUserClient *mailbox=nullptr;
     if(gMailboxOwner==this) {mailbox=gMailboxOwner;gMailboxOwner=nullptr;}
@@ -443,6 +452,16 @@ static IOReturn runCore(AGXDeviceUserClient *connection,uint32_t method,const vo
         native_adreno_wait_outer[0]=native_adreno_wait_outer[0]+1;native_adreno_wait_outer[1]=native_adreno_wait_outer[1]+waited;
         if(waited>native_adreno_wait_outer[3])native_adreno_wait_outer[3]=waited;
     } else {
+        /* BoFree releases the BO's backing pages. Every user view of the same token must be gone first: the view is a descriptor over
+         * the BO's physical ranges, does not retain them, and a client that frees the BO without the matching IOConnectUnmapMemory64
+         * would otherwise leave a live user PTE over freed pages (pmap_assert_free). */
+        if(method==NativeAdrenoMethodBoFree && input && input_size==sizeof(NativeAdrenoAbiBoFree)) {
+            uint32_t token=0;
+            IOLockLock(g.lock);
+            if(connection->live_)token=connection->core_->tokenForHandle(static_cast<const NativeAdrenoAbiBoFree *>(input)->handle);
+            IOLockUnlock(g.lock);
+            if(token)connection->dropViews(token);
+        }
         IOLockLock(g.lock);
         status=connection->live_?connection->core_->dispatch(method,input,input_size,output,output_size,&g.clock):kIOReturnNotReady;
         if(method==NativeAdrenoMethodBoMap && !status && connection->live_ && !connection->kernel_)
@@ -758,4 +777,11 @@ extern "C" uint32_t native_adreno_publish_stats(uint32_t *closed)
 extern "C" IOService *native_adreno_published_service()
 {
     return g.service;
+}
+/* Copy a window of the command ring for the board's hang dump: the CP stops inside a submission older than the last four the ring log keeps,
+ * so the probe reads from the current read pointer instead. */
+extern "C" uint32_t native_adreno_ring_window(uint32_t at,uint32_t count,uint32_t *out)
+{
+    if(!g.ring)return 0;
+    return g.ring->window(at,count,out);
 }

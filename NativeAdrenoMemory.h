@@ -44,11 +44,24 @@ class NativeAdrenoMemory final {
     bool prepared_=false,quarantined_=false,write_combined_=false,pooled_=false;
     size_t pool_offset_=0;
     IOReturn maintainImported(size_t offset,size_t bytes,NativeAdrenoCacheOperation);
+    void steal(NativeAdrenoMemory &o) noexcept {
+        descriptor_=o.descriptor_; imported_=o.imported_; map_=o.map_; read_only_=o.read_only_; mapping_=o.mapping_;
+        spans_=o.spans_; bytes_=o.bytes_; span_count_=o.span_count_; span_capacity_=o.span_capacity_;
+        device_references_=o.device_references_; prepared_=o.prepared_; quarantined_=o.quarantined_;
+        write_combined_=o.write_combined_; pooled_=o.pooled_; pool_offset_=o.pool_offset_;
+        o.descriptor_=nullptr; o.imported_=nullptr; o.map_=nullptr; o.mapping_=nullptr; o.spans_=nullptr;
+        o.bytes_=o.span_count_=o.span_capacity_=o.device_references_=0;
+        o.prepared_=o.quarantined_=o.write_combined_=o.pooled_=false; o.pool_offset_=0; o.read_only_=false;
+    }
 public:
     NativeAdrenoMemory()=default;
     ~NativeAdrenoMemory()=default;
     NativeAdrenoMemory(const NativeAdrenoMemory &)=delete;
     NativeAdrenoMemory &operator=(const NativeAdrenoMemory &)=delete;
+    /* Move-only: a client teardown hands the backing store to the deferred reaper, which releases it only after the dying task's
+     * pmap is gone (freeing inline raced pmap_assert_free against the task's pmap teardown). */
+    NativeAdrenoMemory(NativeAdrenoMemory &&other) noexcept {steal(other);}
+    NativeAdrenoMemory &operator=(NativeAdrenoMemory &&other) noexcept {if(this!=&other){steal(other);}return *this;}
     /* Explicit driver budget; bounded to 256MiB per backing object for now.
      * Error may retain quarantined allocation state if complete() fails.
      * Caller always keeps this object and checks quarantined(), even on error.

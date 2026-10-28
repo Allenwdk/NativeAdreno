@@ -123,5 +123,7 @@ public:
     uint32_t completedFence() const {return completed_;}
     uint32_t submissions() const {return submissions_;}
     uint32_t readPointer() const {return rptr_shadow_;}
+    /* Copy count dwords starting at ring offset at (dwords) for a hang dump; returns the dwords copied. */
+    uint32_t window(uint32_t at,uint32_t count,uint32_t *out) const;
 };
 #endif
