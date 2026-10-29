@@ -315,6 +315,20 @@ bool NativeAdrenoVm::exclusivePages(const NativeAdrenoMemory *memory,unsigned cl
     if(imports!=import_spans_[cls&15])return false;
     return !NativeAdrenoMemory::ownsAnyPage(memory->spans(),memory->spanCount());
 }
+bool NativeAdrenoVm::mappingBelow(uint64_t address,uint64_t out[3]) const
+{
+    out[0]=out[1]=out[2]=0;
+    const Mapping *below=nullptr;uint64_t next=0;
+    for(size_t i=0;i<high_ && mappings_;++i) {
+        const Mapping &m=mappings_[i];
+        if(!m.memory)continue;
+        if(m.iova<=address) {if(!below || m.iova>below->iova)below=&m;}
+        else if(!next || m.iova<next)next=m.iova;
+    }
+    if(!below)return false;
+    out[0]=below->iova;out[1]=below->memory->bytes();out[2]=next;
+    return true;
+}
 NativeAdrenoVm::Mapping *NativeAdrenoVm::find(uint64_t handle)
 {return const_cast<Mapping *>(static_cast<const NativeAdrenoVm *>(this)->find(handle));}
 const NativeAdrenoVm::Mapping *NativeAdrenoVm::find(uint64_t handle) const

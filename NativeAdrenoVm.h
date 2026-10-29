@@ -92,6 +92,7 @@ class NativeAdrenoVm final {
     Mapping *mappings_=nullptr;
     NativeAdrenoHandleIndex index_;   /* live handle -> its mappings_ slot */
     size_t free_hint_=0;   /* no free mappings_ slot below it */
+    char owner_[20]={};
     size_t high_=0;   /* no live mappings_ slot at or above it: the walks over every mapping stop there */
     size_t class_spans_[16]{};   /* mapped spans per alias class, so a map counts the other classes without a walk */
     size_t import_spans_[16]{};   /* the imported mappings' ranges per alias class */
@@ -228,6 +229,11 @@ public:
     /* The lower region's table root with this VM's ASID in bits 63:48: what the bank's TTBR0 holds while the GPU runs this VM. */
     uint64_t ttbr0() const {return regions_[0].state && context_?regions_[0].state->tables.root_physical|(uint64_t)context_->asid<<48:0;}
     unsigned asid() const {return context_?context_->asid:0;}
+    /* The process that opened this address space, for a fault's report. */
+    void setOwner(const char *name) {if(name)strlcpy(owner_,name,sizeof owner_);}
+    const char *owner() const {return owner_;}
+    /* The mapping at or just below address (out: its start, its bytes, the next mapping's start or 0): false without one. */
+    bool mappingBelow(uint64_t address,uint64_t out[3]) const;
     /* TLBIASID of this VM's ASID (its translations only), for an ASID about to be given to another table. */
     IOReturn invalidateAsid();
     size_t objectCount() const {return objects_;}

@@ -323,6 +323,9 @@ static void nativeAdrenoCaptureHang(uint32_t n)
     if(switches)nativeAdrenoHangWords(n,"last-switch",native_adreno_switch_log[(switches-1)%NativeAdrenoSwitchLogRows],NativeAdrenoSwitchLogWords);
     if(ibs)nativeAdrenoHangWords(n,"last-ib",native_adreno_ib_log[(ibs-1)&3],4+28);
 }
+/* The last SMMU fault's place in the selected job's VM: the mapping at or below the address (start, bytes), the next mapping's
+ * start, the address, and the process that opened the VM. Compare the saved hardware TTBR0 before attributing the fault. */
+extern "C" {volatile uint64_t native_adreno_fault_place[4];char native_adreno_fault_owner[20];}
 /* The board's GPU restart (a6xx_recover's reset and hw_init), installed before or after publication. */
 extern "C" void native_adreno_set_restart(NativeAdrenoRestart restart,void *cookie)
 {
@@ -343,12 +346,26 @@ static void nativeAdrenoHangcheck(void *,wait_result_t)
             if(g.restart) {
                 nativeAdrenoCaptureHang(native_adreno_recovery[0]);
                 uint32_t fault[4]={};
+                uint64_t fault_ttbr=0;
+                if(g.context && native_adreno_diag)(void)g.context->readTtbr0(&fault_ttbr);
                 if(g.context && !g.context->endFault(fault) && fault[0]) {
                     native_adreno_recovery_fault[0]=native_adreno_recovery_fault[0]+1;
                     for(unsigned i=0;i<4;++i)native_adreno_recovery_fault[1+i]=fault[i];
                 }
                 NativeAdrenoRecovery result{};
                 const IOReturn status=g.submit->recover(g.restart,g.restart_cookie,&g.clock,&result);
+                if(fault[0] && result.guilty) {
+                    const uint64_t address=(uint64_t)fault[2]<<32|fault[1];
+                    uint64_t place[3]={};
+                    result.guilty->mappingBelow(address,place);
+                    native_adreno_fault_place[0]=place[0];native_adreno_fault_place[1]=place[1];native_adreno_fault_place[2]=place[2];
+                    native_adreno_fault_place[3]=address;
+                    strlcpy(native_adreno_fault_owner,result.guilty->owner(),sizeof native_adreno_fault_owner);
+                    if(native_adreno_diag)
+                        IOLog("NativeAdreno fault place: n=%u owner=%.19s far=%llx below=%llx bytes=%llx next=%llx ttbr=%llx jobttbr=%llx\n",
+                              native_adreno_recovery[0],native_adreno_fault_owner,address,place[0],place[1],place[2],
+                              fault_ttbr,result.guilty->ttbr0());
+                }
                 native_adreno_recovery[3]=result.fence;native_adreno_recovery[4]=uint32_t(status?status:result.status);
                 native_adreno_recovery[5]=native_adreno_recovery[5]+result.replayed;
                 if(result.guilty)native_adreno_recovery[6]=native_adreno_recovery[6]+1;
@@ -606,6 +623,7 @@ bool AGXDeviceUserClient::mount(bool kernel)
     if(kernel)opened=g.kernel_client?kIOReturnBusy:kIOReturnSuccess;
     else opened=g.context?g.context->createVm(&space):kIOReturnNotReady;
     NativeAdrenoVm *vm=kernel?g.vm:space?space->vm():nullptr;
+    if(vm && !kernel)vm->setOwner(name_);
     if(!opened && !vm)opened=kIOReturnNotReady;
     if(!opened)opened=core->open(NativeAdrenoAbiVersion,vm,g.submit,g.ring,g.input_bits,g.output_bits);
     if(opened!=kIOReturnSuccess) {native_adreno_mount_fail[0]=space?2:1;native_adreno_mount_fail[1]=uint32_t(opened);native_adreno_mount_fail[2]=0;native_adreno_mount_fail[3]=native_adreno_mount_fail[3]+1;}
