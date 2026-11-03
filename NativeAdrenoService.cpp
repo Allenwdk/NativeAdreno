@@ -17,6 +17,7 @@
 #include "NativeAdrenoBoard.h"
 #include "NativeAdrenoFirmware.h"
 #include "NativeAdrenoProfile.h"
+extern "C" void NativeAdrenoGpuContextSetChip(uint32_t);
 #include "NativeAdrenoGmuConfig.h"
 #include "NativeAdrenoGmuContext.h"
 #include "NativeAdrenoGmuPlatform.h"
@@ -263,6 +264,7 @@ bool NativeAdrenoGpuService::start(IOService *provider)
     }
     const uint32_t chip_id=providerChipId(provider);
     profile_=NativeAdrenoProfileTable::find(chip_id);
+    NativeAdrenoGpuContextSetChip(chip_id);
     if(!profile_) {
         IOLog("NativeAdreno: qcom,chipid 0x%08x is not a supported profile\n",chip_id);
         IOService::stop(provider);

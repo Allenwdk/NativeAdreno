@@ -22,8 +22,8 @@ int main()
     CHECK(a732->gmu_chip_id==0x70b0000u && a732->gmu_cgc_mode==0x00020202u);
     CHECK(a732->preempt_record_bytes==0x225000u && a732->gmu_gpu_delta==0x68000u);
     CHECK(NativeAdrenoProfileTable::timerGmuLowOffset(a732->gmu_gpu_delta)==0x16220u);
-    CHECK(a732->ubwc_version==4u && a732->highest_bank_bit==16u && a732->ubwc_swizzle==3u);
-    CHECK(a732->acd && !a732->preemption && !a732->ifpc);
+    CHECK(a732->ubwc_version==4u && a732->highest_bank_bit==16u && a732->ubwc_swizzle==6u);
+    CHECK(a732->acd && a732->preemption && !a732->ifpc);
 
     /* Unknown chips are refused instead of inheriting a neighbour's values. */
     CHECK(NativeAdrenoProfileTable::find(0)==nullptr);

@@ -8,14 +8,15 @@
  * 0x43030b00 (SM7675, gen7_11_0) is the Adreno 732 entry from
  * MCC45TR/senemos-uke-kernel-mainline patch 0036: same family and register
  * tables, gen71100 firmware, 1.5 MiB GMEM, gmu_chipid 0x70b0000,
- * gmu_cgc_mode 0x00020202 and a 2196 KiB preemption record. That patch
- * deliberately leaves preemption and IFPC unqualified; ACD levels are part of
+ * gmu_cgc_mode 0x00020202 and a 2196 KiB preemption record. OEM gen7_11_0 enables preemption (adreno-gpulist.h,
+ * ed4ad0d1ad00); upstream keeps IFPC off. The historical mainline candidate
+ * excluded these features from its qualification; ACD levels are part of
  * the live pwrlevel table, so the ACD vote stays enabled. */
 static const NativeAdrenoProfile kA740 = {
     /*chip_id*/0x43050a01u,/*name*/"Adreno740",/*gmem_bytes*/0x300000u,
     /*gmu_chip_id*/0x7020100u,/*gmu_cgc_mode*/0x00020202u,
     /*preempt_record_bytes*/0x418000u,/*ubwc_version*/4u,
-    /*highest_bank_bit*/16u,/*ubwc_swizzle*/3u,/*gmu_gpu_delta*/0x6a000u,
+    /*highest_bank_bit*/16u,/*ubwc_swizzle*/6u,/*gmu_gpu_delta*/0x6a000u,
     /*sqe_firmware*/"a740_sqe.fw",/*gmu_firmware*/"gmu_gen70200.bin",
     /*zap_firmware*/"a740_zap.mbn",/*acd*/true,/*preemption*/true,/*ifpc*/true,
 };
@@ -23,9 +24,9 @@ static const NativeAdrenoProfile kA732 = {
     /*chip_id*/0x43030b00u,/*name*/"Adreno732",/*gmem_bytes*/0x180000u,
     /*gmu_chip_id*/0x70b0000u,/*gmu_cgc_mode*/0x00020202u,
     /*preempt_record_bytes*/0x225000u,/*ubwc_version*/4u,
-    /*highest_bank_bit*/16u,/*ubwc_swizzle*/3u,/*gmu_gpu_delta*/0x68000u,
+    /*highest_bank_bit*/16u,/*ubwc_swizzle*/6u,/*gmu_gpu_delta*/0x68000u,
     /*sqe_firmware*/"gen71100_sqe.fw",/*gmu_firmware*/"gen71100_gmu.bin",
-    /*zap_firmware*/"gen71100_zap.mbn",/*acd*/true,/*preemption*/false,/*ifpc*/false,
+    /*zap_firmware*/"gen71100_zap.mbn",/*acd*/true,/*preemption*/true,/*ifpc*/false,
 };
 
 const NativeAdrenoProfile *NativeAdrenoProfileTable::a740() {return &kA740;}

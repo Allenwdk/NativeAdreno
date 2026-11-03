@@ -5,11 +5,16 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <kern/task.h>
 #include "AdrenoPM4.h"
+#include "NativeAdrenoProfile.h"
 
 static const uint64_t kIovas[GpuBufferCount]={GpuSqeIova,GpuRingIova,GpuMemptrsIova,GpuPwrupIova,GpuScratchIova,
     GpuPreemptRecordIova,GpuPreemptRecord1Iova,GpuPreemptSmmuIova,GpuPreemptSmmu1Iova,GpuRing1Iova,GpuMemptrs1Iova};
-static const size_t kBytes[GpuBufferCount]={GpuSqeBytes,GpuRingBytes,GpuPageBytes,GpuPageBytes,GpuPageBytes,
+static size_t kBytes[GpuBufferCount]={GpuSqeBytes,GpuRingBytes,GpuPageBytes,GpuPageBytes,GpuPageBytes,
     GpuPreemptRecordBytes,GpuPreemptRecordBytes,GpuPageBytes,GpuPageBytes,GpuRingBytes,GpuPageBytes};
+extern "C" void NativeAdrenoGpuContextSetChip(uint32_t chip) {
+    const auto *profile=NativeAdrenoProfileTable::find(chip);
+    if(profile)kBytes[5]=kBytes[6]=profile->preempt_record_bytes;
+}
 IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const unsigned slots[2],
     const uint16_t sids[2],void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report)
 {
