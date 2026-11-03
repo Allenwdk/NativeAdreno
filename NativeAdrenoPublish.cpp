@@ -228,6 +228,9 @@ static void nativeAdrenoHangcheck(void *,wait_result_t)
                     row[5]=result.replayed;row[6]=(g.submit->lastRecoveryStranded()?1u:0u)|(result.guilty?2u:0u);row[7]=g.submit->deadReason();
                     for(unsigned i=0;i<4;++i)row[8+i]=g.submit->recoveryInfo(i);
                     native_adreno_recover_log_count=n+1;
+                    IOLog("NativeAdreno recovery: n=%u fence=%u status=%x replay=%u flags=%x dead=%u info=%x/%x/%x/%x fsr=%x far=%x/%x syn=%x\n",
+                          row[0],row[3],row[4],row[5],row[6],row[7],row[8],row[9],row[10],row[11],
+                          fault[0],fault[1],fault[2],fault[3]);
                 }
                 if(status)g.status.noteFault();
                 if(!status)g.status.noteSuspend();
@@ -932,6 +935,15 @@ extern "C" IOReturn native_adreno_new_user_client(IOService *provider,task_t own
                     }
                 }
                 memset(line,0,sizeof(native_adreno_metal_diag.report2));length=0;
+            }
+            else if(value==0x7000) {
+                /* The plugin terminates its existing text stream explicitly so
+                 * the reason survives a process that exits immediately after it. */
+                static unsigned written;
+                if(!strncmp(line,"problem",7) && written<128) {
+                    char who[20]={};proc_selfname(who,sizeof who);++written;
+                    IOLog("NativeAdreno client: %.19s %.63s\n",who,line);
+                }
             }
             else if(value<0x7100 && length<sizeof(native_adreno_metal_diag.report2)-1) {line[length++]=char(value&0xff);line[length]=0;}
             return kIOReturnUnsupported;

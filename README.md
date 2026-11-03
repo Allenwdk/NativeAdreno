@@ -13,3 +13,6 @@ Build and interface details: [documentation](https://unixnu.com/drivers/adreno74
 `sheng-gpu-trace=1` enables the kernel GPU ring: submission, retirement, display arrival, display fence and latch, build identity, and the render server's render, encode and completion thread identities, 65536 records. Repeated pending display queries are coalesced. See [GPU frame diagnostics](https://unixnu.com/porting/gpu-diagnostics) for fields and decoding.
 
 `NativeGpuPerfCounters.h` defines the opt-in 19-counter A7XX BR plan used by sheng diagnostics. Capture records selector readback, unstable 64-bit reads, reset masks and preemption epochs. The host check verifies the register plan against pinned Mesa XML.
+
+
+Recovery transitions retain a concise kernel-log record with the hung fence, restart result, replay/guilty flags, preemption recovery words and latched SMMU fault. An explicit NUL on the existing plugin marker text also persists bounded refusal summaries before the client exits. Request structures, recovery behavior and scheduling are unchanged; frame/pixel capture stays opt-in.
