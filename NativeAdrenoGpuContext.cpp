@@ -21,8 +21,8 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
     if(!report)return kIOReturnBadArgument;
     *report={};
     if(used_)return kIOReturnBusy;
-    if(!io || !slots || !sids || bank>63 || !asid || asid>0xffff || slots[0]>127 || slots[1]>127 ||
-        slots[0]==slots[1])return kIOReturnBadArgument;
+    if(!io || !slots || !sids || bank>63 || !asid || asid>0xffff || slots[0]>127 ||
+        (sids[1]!=UINT16_MAX && (slots[1]>127 || slots[0]==slots[1])))return kIOReturnBadArgument;
     used_=true;kernel_asid_=asid;
     IOReturn status=kIOReturnSuccess;
     auto step=[&](Step s) {report->step=s;if(progress)progress(s);};
@@ -56,7 +56,9 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
     if(!status) {
         step(Attach);
         const ArmSmmu4KStream routes[2]={{slots[0],sids[0]},{slots[1],sids[1]}};
-        status=smmu_.attach(routes,2);
+        /* UINT16_MAX denotes an absent second board route. Hardware rings and
+         * process address spaces do not depend on the number of input SIDs. */
+        status=smmu_.attach(routes,sids[1]==UINT16_MAX?1u:2u);
         const ArmSmmu4KStreamResult *s=smmu_.streamResult();
         report->route_status=smmu_.attachStatus();
         report->route_phase=s->phase;report->route_writes=s->writes;report->routes_verified=s->streams_verified;

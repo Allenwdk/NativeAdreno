@@ -4,7 +4,7 @@
 #include "NativeAdrenoGmuContext.h"
 
 /* The GPU's own SMMU context, built like the GMU's (NativeAdrenoGmuContext): a native4K lower-region (TTBR0) table
- * for a 0..2^ias GPU space (ias: the bank's input size from ID2.UBS, NativeAdrenoSmmuInputBits), its pages taken on demand, one context bank, the GPU's two streams routed to it, then the kernel buffers the
+ * for a 0..2^ias GPU space (ias: the bank's input size from ID2.UBS, NativeAdrenoSmmuInputBits), its pages taken on demand, one context bank, the board-declared GPU streams routed to it, then the kernel buffers the
  * command processor needs at fixed GPU addresses below the A740 GMEM window (UCHE_GMEM_RANGE_MIN 16 MiB):
  *   sqe      the SQE microcode (a740_sqe.fw without its first dword, as adreno_fw_create_bo copies it), R+X
  *   ring     ring buffer 0, 32 KiB, aligned to its size, R+W
