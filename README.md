@@ -16,3 +16,8 @@ Build and interface details: [documentation](https://unixnu.com/drivers/adreno74
 
 
 Recovery transitions retain a concise kernel-log record with the hung fence, restart result, replay/guilty flags, preemption recovery words and latched SMMU fault. An explicit NUL on the existing plugin marker text also persists bounded refusal summaries before the client exits. Request structures, recovery behavior and scheduling are unchanged; frame/pixel capture stays opt-in.
+
+
+## Uke iPadOS 27 acceptance (2026-11-03)
+
+The gen7_11_0/0x43030b00 port is part of the user-accepted uke 24A446 GPU baseline `90B6BC701210D9DB`: prior boot, icons/widgets, Settings and Dock UI-restart symptoms are reported resolved. Per-process VM, mode-2 dual-ring preemption, FIFO/priority and recovery remain enabled. This report does not independently quantify frame times, concurrent-client stress or repeated reboot cache reuse.
