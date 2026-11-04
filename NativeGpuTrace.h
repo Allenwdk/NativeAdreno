@@ -8,12 +8,15 @@
  * Event fields and joins are documented by scripts/decode-gpu-trace.py. */
 enum { NativeGpuTraceVersion=1, NativeGpuTraceNote=3, NativeGpuTraceMethod=0x7102,
        NativeGpuTraceCapacity=65536, NativeGpuTraceMetadata=4096 };
+enum {NativeGpuShaderBrPlan=0x4252001f}; /* BR, 31 counters; legacy marker31 was BV */
 enum {
     GpuTraceConfig=1, GpuTraceBuild=3,
     GpuTraceSubmit=10, GpuTraceRetire=11,
     GpuTraceDisplay=20, GpuTraceDisplaySurface=21, GpuTraceDisplayFence=22,
     GpuTraceDisplayLatch=23, GpuTraceTurnipPass=36, GpuTraceTurnipGmemSide=37, GpuTraceTurnipAttachment=44,
-    GpuTraceThread=63, GpuTraceProblem=65
+    GpuTraceThread=63, GpuTraceProblem=65,
+    GpuTracePerfInterval=66, GpuTracePerfValuesLow=67, GpuTracePerfValuesHigh=68,
+    GpuTracePerfShaderWaits=69
 };
 struct NativeGpuTraceRecord {
     uint64_t sequence,us;

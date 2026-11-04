@@ -201,6 +201,8 @@ public:
      * CP_IB1_REM_SIZE, CP_IB2_BASE (lo, hi), CP_IB2_REM_SIZE, CP_BV_RB_RPTR, CP_BV_IB1_BASE lo, CP_BV_IB1_REM_SIZE,
      * CP_BV_IB2_REM_SIZE. Never writes a register; a failed read is poison. */
     IOReturn stallState(uint32_t *out);
+    /* Diagnostic read only: a failed register read must not poison a ring. */
+    IOReturn diagnosticState(uint32_t *out) const;
     /* Writes CP_RB_WPTR again with the value already published: for a CP that went idle with work in the ring (a lost write pointer
      * notification); harmless when the CP already saw it. */
     IOReturn kick();

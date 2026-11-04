@@ -43,6 +43,15 @@ int main() {
     /* The render server's GMEM swap trace: Turnip passes, transfers and attachments. */
     for(uint32_t event:{36u,37u,44u})native_gpu_trace_record(event,61,noise,3);
     assert(gpuTrace.issued==issued+4);
+    uint64_t shader[12]={7,1,2,3,4,5,6,7,8,9,10,31};
+    native_gpu_trace_record(GpuTracePerfShaderWaits,0,shader,11);
+    assert(gpuTrace.issued==issued+4);
+    shader[11]=30;native_gpu_trace_record(GpuTracePerfShaderWaits,0,shader,12);
+    assert(gpuTrace.issued==issued+4);
+    shader[11]=31;native_gpu_trace_record(GpuTracePerfShaderWaits,0,shader,12);
+    assert(gpuTrace.issued==issued+5);
+    shader[11]=NativeGpuShaderBrPlan;native_gpu_trace_record(GpuTracePerfShaderWaits,0,shader,12);
+    assert(gpuTrace.issued==issued+6);
     NativeGpuLatencyWaits waits;uint64_t omitted=0;
     assert(waits.keep(1,0,55,3,99,omitted));
     for(unsigned i=2;i<100001;++i)assert(!waits.keep(i,0,55,3,99,omitted));
