@@ -9,6 +9,10 @@
 enum { NativeGpuTraceVersion=1, NativeGpuTraceNote=3, NativeGpuTraceMethod=0x7102,
        NativeGpuTraceCapacity=65536, NativeGpuTraceMetadata=4096 };
 enum {NativeGpuShaderBrPlan=0x4252001f}; /* BR, 31 counters; legacy marker31 was BV */
+/* v2 layout: slot 13 counts SP_STALL_CYCLES_VPC instead of LM_LOAD_INSTRUCTIONS,
+ * which never left zero on Adreno 732. A separate marker so a capture's slot
+ * names are unambiguous. */
+enum {NativeGpuShaderBrPlan2=0x4252021f};
 enum {
     GpuTraceConfig=1, GpuTraceBuild=3,
     GpuTraceSubmit=10, GpuTraceRetire=11,

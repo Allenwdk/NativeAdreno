@@ -18,7 +18,7 @@ static inline bool native_gpu_latency_event(uint32_t event,const uint64_t *value
     case 1:case 3:case 10:case 11:case 20:case 21:case 22:case 23:case 36:case 37:case 44:case 63:case 65:return true;
     case 66:case 67:return count==12;
     case 68:return count==11;
-    case 69:return count==12 && values && (values[11]==31 || values[11]==0x4252001f);
+    case 69:return count==12 && values && (values[11]==31 || values[11]==0x4252001f || values[11]==0x4252021f);
     default:return false;
     }
 }

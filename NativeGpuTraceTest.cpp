@@ -52,6 +52,8 @@ int main() {
     assert(gpuTrace.issued==issued+5);
     shader[11]=NativeGpuShaderBrPlan;native_gpu_trace_record(GpuTracePerfShaderWaits,0,shader,12);
     assert(gpuTrace.issued==issued+6);
+    shader[11]=NativeGpuShaderBrPlan2;native_gpu_trace_record(GpuTracePerfShaderWaits,0,shader,12);
+    assert(gpuTrace.issued==issued+7);
     NativeGpuLatencyWaits waits;uint64_t omitted=0;
     assert(waits.keep(1,0,55,3,99,omitted));
     for(unsigned i=2;i<100001;++i)assert(!waits.keep(i,0,55,3,99,omitted));
