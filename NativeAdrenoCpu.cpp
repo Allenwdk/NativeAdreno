@@ -8,6 +8,7 @@
 #include <kern/clock.h>
 #include <vm/memory_types.h>
 extern "C" vm_offset_t phystokv(uint64_t pa);
+extern "C" void *secure_memset(void *, int, size_t);
 extern "C" uint64_t gPhysBase,gPhysSize;   /* the physical range phystokv covers (the kernel's own DRAM); anything else panics in phystokv */
 extern "C" void pmap_set_cache_attributes(ppnum_t pn,unsigned int cacheattr);
 extern "C" unsigned int pmap_cache_attributes(ppnum_t pn);
@@ -177,7 +178,11 @@ IOReturn NativeAdrenoReassertWriteCombined(const NativeAdrenoPhysicalSpan *spans
 void *NativeAdrenoPoolMapRange(uint64_t physical,size_t bytes,void **owner)
 {
     if(!owner || !physical || !bytes || ((physical|bytes)&4095))return nullptr;
-    IOMemoryDescriptor *range=IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)physical,bytes,kIODirectionInOut);
+    IOAddressRange span = {physical, bytes};
+    const IOOptionBits options = static_cast<IOOptionBits>(kIODirectionInOut) |
+        static_cast<IOOptionBits>(kIOMemoryTypePhysical64) |
+        (static_cast<IOOptionBits>(kIOWriteCombineCache) << kIOMemoryBufferCacheShift);
+    IOMemoryDescriptor *range = IOMemoryDescriptor::withOptions(&span, 1, 0, nullptr, options, nullptr);
     if(!range)return nullptr;
     IOMemoryMap *map=range->createMappingInTask(kernel_task,0,kIOMapAnywhere|kIOMapWriteCombineCache);
     range->release();
@@ -198,7 +203,9 @@ IOReturn NativeAdrenoPoolScrub(void *mapping,size_t bytes,bool drop_lines)
         const IOReturn dropped=maintainOwnedPages(mapping,bytes,NativeAdrenoInvalidate);
         if(dropped)return dropped;
     }
-    bzero(mapping,bytes);
+    // Use XNU's store-only physical-memory clearing primitive. Its ARM64
+    // assembly avoids DC ZVA if a platform maps this buffer as Device.
+    secure_memset(mapping, 0, bytes);
     __asm__ volatile("dsb sy":::"memory");
     return kIOReturnSuccess;
 }
