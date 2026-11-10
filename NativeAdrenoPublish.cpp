@@ -392,11 +392,15 @@ OSDefineMetaClassAndStructors(NativeAdrenoGpuPublished,IOService)
  * IOMemoryMap made from it, in whatever task, is gone. A BO freed while a client still maps it therefore leaves its pages out of
  * the pool, as a view of a descriptor BO keeps that BO's VM object.
  * A mapping IOKit does not know of is the other way to keep the pages mapped: the client can copy its mapping in the VM
- * (mach_vm_remap, a memory entry), which holds the VM object of this descriptor's device pager, not the descriptor. The driver cannot
- * see that, so the pool does not reuse the pages of a grant that had a view unless the board set gpu-pool=2 (NativeAdrenoPool.h). */
+ * (mach_vm_remap, a memory entry), which holds the VM object of this descriptor's device pager, not the descriptor. Where the kernel
+ * reports the pager's close (iokit_physical_descriptor_close_notify), the view's reference goes only then, when no map entry, memory
+ * entry or copy refers to that VM object any more, and the pages return to the pool. Without that report the pool does not reuse
+ * the pages of a grant that had a view unless the board set gpu-pool=2 (NativeAdrenoPool.h). */
+extern "C" kern_return_t iokit_physical_descriptor_close_notify(IOMemoryDescriptor *,void (*)(void *),void *) __attribute__((weak_import));
 class NativeAdrenoPoolView : public IOGeneralMemoryDescriptor {
     OSDeclareDefaultStructors(NativeAdrenoPoolView)
     NativeAdrenoPoolGrant *grant_=nullptr;
+    bool tracked_=false;   /* the kernel drops the grant's reference at the pager's close (NativeAdrenoPoolViewClosed), not free() */
 public:
     static NativeAdrenoPoolView *make(NativeAdrenoPoolGrant *grant);
     void free() APPLE_KEXT_OVERRIDE;
@@ -417,7 +421,11 @@ NativeAdrenoPoolView *NativeAdrenoPoolView::make(NativeAdrenoPoolGrant *grant)
     IODeleteData(ranges,IOAddressRange,grant->count);
     if(view) {
         NativeAdrenoPoolRetain(grant);
-        NativeAdrenoPoolNoteView(grant);   /* a client can map the pages from here on */
+        /* Before anything can map the view: from here on the reference belongs to the kernel's report, which comes exactly once. */
+        const bool hook=&iokit_physical_descriptor_close_notify!=nullptr;
+        native_adreno_pool_views[4]=hook?1:0;
+        view->tracked_=hook && iokit_physical_descriptor_close_notify(view,NativeAdrenoPoolViewClosed,grant)==KERN_SUCCESS;
+        NativeAdrenoPoolNoteView(grant,view->tracked_);   /* a client can map the pages from here on */
         view->grant_=grant;
     }
     return view;
@@ -426,9 +434,11 @@ void NativeAdrenoPoolView::free()
 {
     /* Every IOMemoryMap of this descriptor is gone: each held a reference to it. */
     NativeAdrenoPoolGrant *const grant=grant_;
+    const bool tracked=tracked_;
     grant_=nullptr;
+    /* A tracked view's reference goes with the kernel's report, from this free (never mapped) or from the VM's last unmap later. */
     IOGeneralMemoryDescriptor::free();
-    NativeAdrenoPoolRelease(grant);
+    if(!tracked)NativeAdrenoPoolRelease(grant);
 }
 
 class AGXDeviceUserClient : public IOUserClient {
@@ -995,7 +1005,8 @@ static IOReturn runCore(AGXDeviceUserClient *connection,uint32_t method,const vo
         lockTimed(lockWait);
         locked=mach_absolute_time();
         spans=native_adreno_bo_memory[1];
-        if(connection->live_)connection->core_->offerSystemPages(pages.held()?&pages:nullptr);
+        /* Offered for every BoAlloc, held or not: allocateSystem then knows it runs under the lock and leaves the pool alone. */
+        if(connection->live_)connection->core_->offerSystemPages(alloc?&pages:nullptr);
         if(connection->live_ && freeing)connection->core_->collectFreedPages(&freed);
         status=connection->live_?connection->core_->dispatch(method,input,input_size,output,output_size,&g.clock):kIOReturnNotReady;
         if(connection->live_)connection->core_->offerSystemPages(nullptr);
