@@ -108,6 +108,8 @@ static int exposed(Path &p,bool write_combined=false)
     return p.submit.attach(&p.vm,&p.ring);
 }
 void NativeAdrenoNotePhase(unsigned,size_t) {}
+extern "C" {extern volatile uint32_t native_adreno_submit_ibs[4],native_adreno_diag,native_adreno_ib_log[4][4+28],native_adreno_ib_log_count;
+    extern volatile uint64_t native_adreno_submit_us[8];}
 int main()
 {
     /* One validated indirect-buffer submission with exact ring bytes. */
@@ -163,7 +165,9 @@ int main()
         CHECK(audited.size()==2 && audited[0]==p.object.spans()[0].physical && audited[1]==4096);
         CHECK(native_adreno_wc_audit[0]==submissions+1 && native_adreno_wc_audit[1]==lines+64 && native_adreno_wc_distrusted==0);
         CHECK(fixture.physical_calls==physical && fixture.cache_calls==owned && p.vm.writeCombinedTrusted());   /* no maintenance */
-        fencemem[1]=1;CHECK(p.submit.wait(1,&ringclock,1000)==kIOReturnSuccess);
+        CHECK(p.submit.fencePending(1) && !p.submit.fencePending(2));   /* one ring: pending until the CP writes it; 2 was never handed out */
+        fencemem[1]=1;CHECK(!p.submit.fencePending(1));
+        CHECK(p.submit.wait(1,&ringclock,1000)==kIOReturnSuccess && !p.submit.fencePending(1));
         dirty_lines=2;
         CHECK(p.submit.submit(&buffer,1,0,&fence)==kIOReturnSuccess && fence==2);
         CHECK(!p.vm.writeCombinedTrusted() && native_adreno_wc_distrusted);
@@ -329,7 +333,18 @@ int main()
         }
         uint32_t issued=0,retired=0;CHECK(p.submit.fenceProgress(&issued,&retired) && issued==second && retired==first-1);
         CHECK(p.submit.observeFence(first,nullptr,0)==kIOReturnTimeout);
-        lowfence[1]=first;CHECK(p.submit.retireCompleted()==0 && p.submit.outstanding()==0);
+        /* A waiter's check is its own ring's: the high ring's finished fence is not pending while the scanout's prefix still waits for
+         * the low ring's older one. Neither an unknown fence nor fence 0 is pending (wait() answers those). */
+        CHECK(p.submit.fencePending(first) && !p.submit.fencePending(second) && !p.submit.fencePending(second+1) && !p.submit.fencePending(0));
+        p.submit.nextPriority(0);uint32_t running=0;CHECK(p.submit.submit(&p.vm,&buffer,1,8,&running,&ringclock)==0);
+        cp.regs[0x08a0]=0x340;(void)p.submit.preemptIrq();
+        CHECK(p.submit.fencePending(running) && p.submit.fencePending(first));
+        fencemem[0]=p.ring.writePointer();fencemem[1]=running;
+        CHECK(!p.submit.fencePending(running) && p.submit.fencePending(first));   /* written, not yet retired */
+        CHECK(p.submit.wait(running,&ringclock,0)==0 && !p.submit.fencePending(running) && p.submit.outstanding()==1);second=running;
+        cp.regs[0x08a0]=0x340;(void)p.submit.preemptIrq();
+        lowfence[1]=first;CHECK(!p.submit.fencePending(first));
+        CHECK(p.submit.retireCompleted()==0 && p.submit.outstanding()==0);
         CHECK(p.submit.fenceProgress(&issued,&retired) && issued==second && retired==second);
         CHECK(p.submit.wait(first,&ringclock,0)==0 && p.submit.observeFence(first,nullptr,0)==0);
         CHECK(p.submit.wait(second+1,&ringclock,0)==kIOReturnBadArgument);
@@ -337,6 +352,100 @@ int main()
         CHECK(p.submit.submit(&p.vm,&buffer,1,7,&second,&ringclock)==0 && p.ring.lastSubmitted()==second);
         fencemem[1]=second;CHECK(p.submit.retireCompleted()==0);
         std::puts("PASS two-ring priorities, per-ring table/context, queue FIFO, fence-history rollover and CPU-table fallback");
+    }
+    {
+        /* A wait that pauses under the caller's lock (a connection's teardown) for a low-ring job behind a busy high ring. The pause
+         * plays the CP: the high job ends, a triggered switch finishes, and the low ring's job runs only once the CP was switched
+         * to it. Nothing but the wait looks at the rings, so the wait itself has to trigger and complete the switch. */
+        Path p;CHECK(exposed(p)==kIOReturnSuccess);NativeAdrenoRing low;
+        static uint32_t lowfence[1024];std::memset(lowfence,0,sizeof(lowfence));
+        uint32_t lowmem[8192]{};uint8_t rec[2][64]{},info[2][32]{};
+        CHECK(low.attachSecondary(&ringio,&ringcache,lowmem,sizeof(lowmem),0x200000,lowfence,sizeof(lowfence),0x208000)==0);
+        CHECK(p.ring.setPreempt(0x300000,0x400000,0x108008)==0 && low.setPreempt(0x500000,0x600000,0x208008)==0);
+        NativeAdrenoSubmit::PreemptSetup setup{};setup.io={&cp,cwrite,cread,cbarrier,nullptr,nullptr};
+        setup.pages={{0x300000,0x500000},{0x400000,0x600000},{rec[0],rec[1]},{info[0],info[1]}};
+        setup.now=cnow;setup.clock=&cp;setup.mode=2;
+        CHECK(p.submit.setPreemption(&p.ring,&low,setup,true)==0);
+        auto write=[](void *,uint64_t)->IOReturn{return 0;};
+        CHECK(p.submit.setTableSwitching(2,write,nullptr)==0);
+        p.ring.tableInstalled(0xaaaa000);low.tableInstalled(0xbbbb000);
+        NativeAdrenoSubmitBuffer buffer{p.handle,0x800000,4096};
+        static uint32_t high_fence,low_fence,pauses,switched;high_fence=low_fence=pauses=switched=0;
+        clock_us=1;p.submit.nextPriority(0);CHECK(p.submit.submit(&p.vm,&buffer,1,8,&high_fence,&ringclock)==0);
+        p.submit.nextPriority(1);CHECK(p.submit.submit(&p.vm,&buffer,1,7,&low_fence,&ringclock)==0);
+        CHECK(p.ring.lastSubmitted()==high_fence && low.lastSubmitted()==low_fence && !(cp.regs[0x08a0]&1));   /* the high ring keeps the CP */
+        const NativeAdrenoRingClock playing{&cp,cnow,[](void *)->int {
+            clock_us+=1000;++pauses;
+            if(pauses==1)fencemem[1]=high_fence;                                    /* the high ring goes idle */
+            else if(cp.regs[0x08a0]&1) {cp.regs[0x08a0]&=~1u;switched=pauses;}      /* the CP finishes a triggered switch */
+            else if(switched && pauses>switched)lowfence[1]=low_fence;              /* and only then runs the low ring's job */
+            return 0;}};
+        CHECK(p.submit.wait(low_fence,&playing,2000000)==kIOReturnSuccess);
+        CHECK(switched && pauses<=8 && p.submit.preemptStats().triggers==1 && p.submit.preemptStats().completed==1);
+        CHECK(p.submit.retireCompleted()==0 && p.submit.outstanding()==0);
+        std::puts("PASS a pausing wait drives the ring switch for a low-ring job");
+    }
+    /* The driver's own synchronized buffers at a submission: not cleaned, and audited by the first 8 submissions and every 1024th. A
+     * dirty line the audit finds ends the trust: that submission and every later one clean them again, and the audits stop. */
+    {
+        Path p;CHECK(exposed(p)==kIOReturnSuccess);
+        NativeAdrenoMemory driver;
+        CHECK(driver.allocate(8192,40,true,8192)==kIOReturnSuccess && driver.declareSynchronized()==kIOReturnSuccess);
+        uint64_t mapped=0;
+        CHECK(p.vm.map(&driver,0,0x804000,3,0,2,&mapped)==kIOReturnSuccess);
+        NativeAdrenoSubmitBuffer buffer{p.handle,0x800000,4096};
+        static uint64_t dirty_page;static unsigned pages;dirty_page=0;pages=0;
+        native_adreno_line_audit=[](uint64_t physical,size_t bytes,uint32_t *dirty,uint32_t *) {
+            CHECK(bytes==4096);++pages;if(physical==dirty_page)*dirty+=1;return 0;};
+        native_adreno_submit_ibs[0]=0;native_adreno_sync_audit[4]=0;
+        const uint32_t audits=native_adreno_sync_audit[0],lines=native_adreno_sync_audit[1];
+        uint32_t fence=0,n=0;
+        auto run=[&](unsigned owned) {
+            const unsigned before=fixture.cache_calls;
+            CHECK(p.submit.submit(&buffer,1,0,&fence)==kIOReturnSuccess && fence==++n);
+            CHECK(fixture.cache_calls==before+owned);
+            fencemem[1]=n;CHECK(p.submit.wait(n,&ringclock,1000)==kIOReturnSuccess);
+        };
+        const unsigned physical=fixture.physical_calls;
+        for(unsigned i=0;i<10;++i)run(1);   /* the IB's own buffer alone (kernel memory nobody declared) */
+        CHECK(pages==16 && native_adreno_sync_audit[0]==audits+8 && native_adreno_sync_audit[1]==lines+8*128);
+        CHECK(fixture.physical_calls==physical+16);   /* each audited page's lines dropped again */
+        native_adreno_submit_ibs[0]=1023;run(1);
+        CHECK(pages==18 && native_adreno_sync_audit[0]==audits+9 && !native_adreno_sync_audit[4]);
+        native_adreno_submit_ibs[0]=2047;dirty_page=driver.spans()[0].physical+4096;
+        run(2);   /* found dirty: cleaned from this submission on */
+        CHECK(pages==20 && native_adreno_sync_audit[2]==1 && native_adreno_sync_audit[4]==native_adreno_sync_audit[0]);
+        native_adreno_submit_ibs[0]=3071;run(2);
+        CHECK(pages==20);
+        native_adreno_line_audit=nullptr;native_adreno_sync_audit[4]=0;native_adreno_sync_audit[2]=0;
+        run(1);   /* trusted again (the host's reset): left alone */
+        CHECK(p.vm.unmap(mapped)==kIOReturnSuccess && driver.release()==kIOReturnSuccess);
+        CHECK(p.submit.detach()==kIOReturnSuccess);
+        std::puts("PASS synchronized driver buffers at a submission, their audit and its distrust");
+    }
+    /* The submission log keeps the IB's address and size always and reads its words only with diag=1; the phases of a submission with
+     * a clock are timed. */
+    {
+        Path p;CHECK(exposed(p)==kIOReturnSuccess);
+        NativeAdrenoSubmitBuffer buffer{p.handle,0x800000,4096};
+        static_cast<volatile uint32_t *>(p.object.mapping())[0]=0x70970001u;
+        uint32_t fence=0;
+        native_adreno_diag=0;
+        CHECK(p.submit.submit(&buffer,1,0,&fence)==kIOReturnSuccess && fence==1);
+        const volatile uint32_t *row=native_adreno_ib_log[(native_adreno_ib_log_count-1)&3];
+        CHECK(row[0]==1 && row[1]==0x800000 && row[3]==4096 && row[4]==0);
+        fencemem[1]=1;CHECK(p.submit.wait(1,&ringclock,1000)==kIOReturnSuccess);
+        native_adreno_diag=1;
+        const uint64_t timed=native_adreno_submit_us[0],total=native_adreno_submit_us[6];
+        clock_us=50;
+        CHECK(p.submit.submit(&p.vm,&buffer,1,0,&fence,&ringclock)==kIOReturnSuccess && fence==2);
+        row=native_adreno_ib_log[(native_adreno_ib_log_count-1)&3];
+        CHECK(row[0]==2 && row[4]==0x70970001u);
+        CHECK(native_adreno_submit_us[0]==timed+1 && native_adreno_submit_us[6]==total);   /* the host's clock stands still */
+        native_adreno_diag=0;
+        fencemem[1]=2;CHECK(p.submit.wait(2,&ringclock,1000)==kIOReturnSuccess);
+        CHECK(p.submit.detach()==kIOReturnSuccess);
+        std::puts("PASS the submission log without and with diag=1, and the timed phases");
     }
     std::printf("PASS: 1 execbuf submission with exact IB packet and fence, 8 pre-reference refusals, 1 duplicate-buffer reference case and 1 poisoned-commit retention case over software SMMU/CP peers; 2 write-combine audit cases (trusted, dirty and failed); 1 hangcheck and 1 recovery with replay, 1 usable VM after recovery and 1 failed restart\n");
 }

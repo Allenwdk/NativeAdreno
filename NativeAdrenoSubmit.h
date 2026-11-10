@@ -131,8 +131,13 @@ private:
      * through it. */
     NativeAdrenoRing *ring(unsigned index=0) {return index<ring_count_?rings_[index]:ring_;}
     void driveSwitch(const NativeAdrenoRingClock *clock);
+    /* The ring's wait for wait(): held, a fence a job holds (NativeAdrenoRing::wait), otherwise an earlier one (observeFence). With
+     * two rings a wait that pauses drives the switch between them after every pause. */
+    NativeAdrenoRingFence waitOnRing(NativeAdrenoRing *r,bool held,uint32_t fence,const NativeAdrenoRingClock *clock,
+        uint32_t timeout_us,uint32_t *observed);
     NativeAdrenoSubmitStats stats_{};
-    void noteStall(uint32_t observed,const NativeAdrenoRingClock *clock);   /* the CP's state for a fence that stopped advancing (native_adreno_stall) */
+    /* The CP's state for a fence that stopped advancing (native_adreno_stall); waited is the fence the timed-out wait was for. */
+    void noteStall(uint32_t observed,const NativeAdrenoRingClock *clock,uint32_t waited);
     bool attached_=false,poisoned_=false;
     uint32_t audit_tick_=0;   /* submissions since attach; every eighth one audits its IB lines */
     /* submit()'s distinct buffers and ring words: too large for the kernel stack at 128 IBs (callers serialize every method) */
@@ -166,6 +171,11 @@ public:
     bool preemptIrq();
     /* Global completed prefix for scanout: later completions on another ring cannot skip pending work. */
     bool fenceProgress(uint32_t *submitted,uint32_t *retired,uint32_t *rings=nullptr);
+    /* Whether the CP has still to write fence on the ring that issued it: true only for a fence a job holds (or, with one ring, one
+     * that ring handed out) whose ring's fence word is below it. A fence of the other ring that is still pending does not count, unlike
+     * the scanout's prefix. False for everything else (a retired or unknown fence, a poisoned object), where wait() has the answer.
+     * No side effect: the check of a waiter before it sleeps and of the completion pass that wakes it. */
+    bool fencePending(uint32_t fence);
     /* The switch counters, the ring the CP runs, whether a switch is in flight and the control register as the hardware holds it. */
     /* A word of ring `index`'s preemption record as the CPU sees it now (the CP saves the read pointer, info and errno there). */
     uint32_t recordWord(unsigned index,uint32_t byte_offset) const
