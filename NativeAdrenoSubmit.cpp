@@ -739,6 +739,7 @@ void NativeAdrenoSubmit::noteStall(uint32_t observed,const NativeAdrenoRingClock
         stall_fence=next;stall_timeouts=0;stall_stage=0;
         /* Where the CP was at the fence's first timed-out wait, to tell at the first stage whether it moved since. */
         if(stalled->progressState(stall_begin_cp_))for(unsigned i=0;i<6;++i)stall_begin_cp_[i]=~0u;
+        if(stalled->bvProgressState(stall_begin_bv_))for(unsigned i=0;i<5;++i)stall_begin_bv_[i]=~0u;
     }
     stall_last_us=now;
     const uint64_t pending=now-stall_began_us;
@@ -746,16 +747,25 @@ void NativeAdrenoSubmit::noteStall(uint32_t observed,const NativeAdrenoRingClock
     /* Before the first stage acts: where the CP is now and 500 us later. Unchanged since the first wait and over the 500 us, the CP
      * stopped; changed, it is still working through the job (a long job, not a lost write pointer). The snapshot below is taken
      * before the stage too, so its registers are the stall's and not the stage's result. */
+    bool working=false;
     if(kick_due) {
-        uint32_t at[6]={},later[6]={};
+        uint32_t at[6]={},later[6]={},bv[5]={},bvLater[5]={};
         if(stalled->progressState(at))for(unsigned k=0;k<6;++k)at[k]=~0u;
+        if(stalled->bvProgressState(bv))for(unsigned k=0;k<5;++k)bv[k]=~0u;
         IODelay(500);
         if(stalled->progressState(later))for(unsigned k=0;k<6;++k)later[k]=~0u;
+        if(stalled->bvProgressState(bvLater))for(unsigned k=0;k<5;++k)bvLater[k]=~0u;
         uint32_t moved=0;
         for(unsigned k=0;k<6;++k) {
             if(at[k]!=stall_begin_cp_[k])moved|=1;
             if(later[k]!=at[k])moved|=2;
             native_adreno_stall_kick[2+k]=stall_begin_cp_[k];native_adreno_stall_kick[8+k]=at[k];native_adreno_stall_kick[14+k]=later[k];
+        }
+        /* The BV thread: with concurrent binning BR stands at a wait for BV (CP_BV_BR_COUNT_OPS, a BV timestamp) while the visibility
+         * pass runs, so BR's words alone would call a working GPU stopped and the stages below would act on it. */
+        for(unsigned k=0;k<5;++k) {
+            if(bv[k]!=stall_begin_bv_[k])moved|=4;
+            if(bvLater[k]!=bv[k])moved|=8;
         }
         const Job *const owner=find(next);
         native_adreno_stall_kick[20]=moved;native_adreno_stall_kick[21]=0;
@@ -765,6 +775,14 @@ void NativeAdrenoSubmit::noteStall(uint32_t observed,const NativeAdrenoRingClock
         native_adreno_stall_kick[1]=pending>UINT32_MAX?UINT32_MAX:(uint32_t)pending;
         native_adreno_stall_kick[0]=stall_fence;
         native_adreno_stall_kick[25]=native_adreno_stall_kick[25]+1;
+        /* The CP moved: a long job, not a stop (every kick of four runs found it moving, tiled passes of 100 to 160 ms). Nothing is
+         * done to a working GPU: the stages below count their time from this sample, so they act only after that long without
+         * progress. */
+        if(moved) {
+            working=true;stall_began_us=now;
+            for(unsigned k=0;k<6;++k)stall_begin_cp_[k]=later[k];
+            for(unsigned k=0;k<5;++k)stall_begin_bv_[k]=bvLater[k];
+        }
     }
     ++stall_timeouts;
     if(now && snapshot_due(&stall_snapshots,pending))snapshot(next,waited,now,pending,stalled);
@@ -776,7 +794,7 @@ void NativeAdrenoSubmit::noteStall(uint32_t observed,const NativeAdrenoRingClock
      * 5 ms against 1 ms waits, so most "stalls" are ordinary jobs still running; the write pointer is never dropped (fenced writes saw no
      * drop) and invalidating at map time changed nothing. i553: the handler ran on 6712 of 6911 jobs. It now waits for 50 ms without
      * progress, measured in time (a timed-out wait is one poll, 100 us or less), and so does the snapshot below. */
-    if(kick_due) {
+    if(kick_due && !working) {
         native_adreno_unstick[0]=native_adreno_unstick[0]+1;native_adreno_unstick[1]=stall_fence;stall_stage=1;
         const uint32_t r0=stalled->readPointer(),w0=stalled->writePointer()&0xffff;
         (void)vm_->invalidateTlb();(void)stalled->kick();
@@ -948,11 +966,13 @@ IOReturn NativeAdrenoSubmit::retireCompleted()
 bool NativeAdrenoSubmit::madeProgress()
 {
     if(progress_retries_>=3)return false;
-    uint32_t state[6]={};
-    if(ring(0)->progressState(state))return false;
+    uint32_t state[6]={},bv[5]={};
+    if(ring(0)->progressState(state) || ring(0)->bvProgressState(bv))return false;
     bool progress=false;
     for(unsigned i=0;i<6;++i)if(state[i]!=last_cp_[i])progress=true;
+    for(unsigned i=0;i<5;++i)if(bv[i]!=last_bv_[i])progress=true;   /* BR may be waiting for a visibility pass BV still runs */
     for(unsigned i=0;i<6;++i)last_cp_[i]=state[i];
+    for(unsigned i=0;i<5;++i)last_bv_[i]=bv[i];
     if(!progress)return false;
     ++progress_retries_;
     return true;
