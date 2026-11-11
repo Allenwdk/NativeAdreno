@@ -502,16 +502,28 @@ IOReturn NativeAdrenoSubmit::submit(NativeAdrenoVm *vm,const NativeAdrenoSubmitB
     uint64_t *handles=scratch_handles_;size_t handle_count=0;
     uint32_t *words=scratch_words_;size_t word_count=0;
     uint64_t ib_bytes=0;
+    auto refuse=[&](const char *stage,size_t index,const NativeAdrenoSubmitBuffer &buffer,
+                    uint64_t start,size_t size,IOReturn status) {
+        static unsigned logged=0;   /* Called under the driver's lock. */
+        if(native_adreno_diag && logged<32) {
+            ++logged;
+            IOLog("NativeAdreno submit VM refuse: pid=%d stage=%s status=%x ib=%zu/%zu handle=%llx va=%llx bytes=%zu map=%llx/%zu\n",
+                  next_owner_,stage,uint32_t(status),index,count,(unsigned long long)buffer.handle,
+                  (unsigned long long)buffer.iova,buffer.bytes,(unsigned long long)start,size);
+        }
+        return status;
+    };
     static_assert(sizeof(scratch_words_)/sizeof(scratch_words_[0])>=SubmitMaxBuffers*(1+SubmitIbWords),"ring words");
     for(size_t i=0;i<count;++i) {
         const NativeAdrenoSubmitBuffer &buffer=buffers[i];
         if(!buffer.handle || !buffer.bytes || (buffer.bytes&3) || buffer.bytes>SubmitMaxIbBytes)
-            return kIOReturnBadArgument;
+            return refuse("ib-size",i,buffer,0,0,kIOReturnBadArgument);
         uint64_t iova=0;size_t bytes=0;unsigned permissions=0;
         IOReturn status=vm_->describe(buffer.handle,&iova,&bytes,&permissions);
-        if(status)return status;
+        if(status)return refuse("describe",i,buffer,iova,bytes,status);
         if(!(permissions&ArmSmmu4KRead) || buffer.iova<iova ||
-            buffer.iova-iova>bytes || buffer.bytes>bytes-(buffer.iova-iova))return kIOReturnBadArgument;
+            buffer.iova-iova>bytes || buffer.bytes>bytes-(buffer.iova-iova))
+            return refuse("ib-range",i,buffer,iova,bytes,kIOReturnBadArgument);
         uint32_t header=0;
         if(AdrenoPM4Type7(SubmitIndirectBuffer,SubmitIbWords,&header)!=AdrenoPM4Success)
             return poison();
@@ -649,6 +661,14 @@ IOReturn NativeAdrenoSubmit::submit(NativeAdrenoVm *vm,const NativeAdrenoSubmitB
     const uint32_t number=(value=base)+1;
     status=preemption()?target->submitFramed(words,word_count,number,&value):target->submitFramed(words,word_count,&value);
     if(status) {
+        if(status==kIOReturnBadArgument) {
+            static unsigned logged=0;
+            if(native_adreno_diag && logged<32) {
+                ++logged;
+                IOLog("NativeAdreno submit ring refuse: pid=%d ring=%u next=%u previous=%u words=%zu\n",
+                      next_owner_,index,number,target->lastSubmitted(),word_count);
+            }
+        }
         if(!value)fence_issued_=base;
         /* A poisoned ring may already have consumed the WPTR write, so the
          * referenced buffers cannot be retired here. */

@@ -410,15 +410,27 @@ IOReturn NativeAdrenoUserClient::setPriority(uint32_t foreground,uint32_t backgr
     }
     return kIOReturnSuccess;
 }
+extern "C" volatile uint32_t native_adreno_diag;
 IOReturn NativeAdrenoUserClient::submit(const NativeAdrenoAbiSubmit *request,
     NativeAdrenoAbiSubmitReply *reply,const NativeAdrenoRingClock *clock)
 {
     if(!request || !reply)return kIOReturnBadArgument;reply->fence=0;
     if(!open_)return kIOReturnNotReady;
-    if(!request->buffer_count || request->buffer_count>NativeAdrenoAbiMaxBuffers ||
-        request->reserved)return kIOReturnBadArgument;
-    if(request->queue>=queue_capacity_ || !queues_[request->queue].active)
+    auto refuse=[&](const char *stage,uint32_t index,const NativeAdrenoAbiSubmitBuffer *wire) {
+        static unsigned logged=0;   /* Called under the driver's lock. */
+        if(native_adreno_diag && logged<32) {
+            ++logged;
+            IOLog("NativeAdreno submit refuse: pid=%d stage=%s count=%u queue=%llu ib=%u handle=%llx va=%llx bytes=%llu\n",
+                  proc_selfpid(),stage,request->buffer_count,(unsigned long long)request->queue,index,
+                  (unsigned long long)(wire?wire->handle:0),(unsigned long long)(wire?wire->iova:0),
+                  (unsigned long long)(wire?wire->bytes:0));
+        }
         return kIOReturnBadArgument;
+    };
+    if(!request->buffer_count || request->buffer_count>NativeAdrenoAbiMaxBuffers ||
+        request->reserved)return refuse("request",0,nullptr);
+    if(request->queue>=queue_capacity_ || !queues_[request->queue].active)
+        return refuse("queue",0,nullptr);
     if(request->wait_fence) {
         if(!clock)return kIOReturnBadArgument;
         const uint32_t wait_us=request->wait_timeout_ns==0?0:
@@ -430,9 +442,9 @@ IOReturn NativeAdrenoUserClient::submit(const NativeAdrenoAbiSubmit *request,
     NativeAdrenoSubmitBuffer *buffers=submit_buffers_;
     for(uint32_t i=0;i<request->buffer_count;++i) {
         const NativeAdrenoAbiSubmitBuffer &wire=request->buffers[i];
-        if(!wire.bytes || (wire.bytes&3))return kIOReturnBadArgument;
+        if(!wire.bytes || (wire.bytes&3))return refuse("wire-size",i,&wire);
         Entry *entry=find(wire.handle);
-        if(!entry || !entry->mapped_state)return kIOReturnBadArgument;
+        if(!entry || !entry->mapped_state)return refuse(entry?"wire-unmapped":"wire-handle",i,&wire);
         buffers[i]={entry->mapped,wire.iova,(size_t)wire.bytes};
     }
     uint32_t fence=0;

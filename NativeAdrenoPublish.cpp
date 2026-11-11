@@ -1064,6 +1064,11 @@ IOReturn AGXDeviceUserClient::run(uint32_t method,const void *input,size_t input
     uint64_t lockClock[LockClockWords]={};
     const uint64_t entered=mach_absolute_time();
     const IOReturn status=runTimed(method,input,input_size,output,output_size,lockClock,prepared);
+    if(method==NativeAdrenoMethodSubmit && status==kIOReturnBadArgument && native_adreno_diag) {
+        static unsigned logged=0;
+        if(__atomic_fetch_add(&logged,1,__ATOMIC_RELAXED)<32)
+            IOLog("NativeAdreno submit ABI refuse: pid=%d in=%zu out=%zu\n",proc_selfpid(),input_size,output_size);
+    }
     if(NativeAdrenoCallRec *ring=native_adreno_call_ring) {
         const uint32_t held=microseconds(0,lockClock[LockHeld])/16;
         const uint32_t n=__atomic_fetch_add(&native_adreno_call_count,1,__ATOMIC_RELAXED);
