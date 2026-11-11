@@ -87,3 +87,5 @@ trace flag16 retains its Uke preflight meaning, with flag32 recording a pool gra
 Completion-pass fence wakeups, ring switching, synchronized-buffer maintenance,
 mailbox sleep and owner/view counters follow upstream. Build and hardware results
 are recorded separately in the workspace's CPU/GPU synchronization report.
+
+When a failed ring switch strands work that never executed, recovery resets the completion fence to the predecessor of the oldest outstanding job and replays that job. A task blamed for an actual execution hang follows the existing skip policy. The submission regression checks the emitted replay and keeps the stranded job pending until its fence completes.

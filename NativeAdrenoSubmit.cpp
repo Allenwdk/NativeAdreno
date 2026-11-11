@@ -1076,10 +1076,12 @@ IOReturn NativeAdrenoSubmit::recover(NativeAdrenoRestart restart,void *cookie,co
     /* A hang inside a second-ring job is blamed on the second ring: it is given up (reason 4), the replay and everything after run on the first. */
     if(guilty && guilty->ring==1)markPreemptDead(4);
     recovery_info_[0]=guilty?uint32_t(guilty->ring):9;recovery_info_[1]=last0;recovery_info_[2]=last1;recovery_info_[3]=preemption()?preempt_.loaded():0;
-    IOReturn status=restart(cookie,ring(0),hung);
+    /* A stranded job never ran. Keep its predecessor as the completed fence so the job itself is replayed. */
+    const uint32_t completed=stranded?fence:hung;
+    IOReturn status=restart(cookie,ring(0),completed);
     out->status=status;
     if(status) {native_adreno_recover_trace[0]=2;native_adreno_recover_trace[1]=uint32_t(status);return poison();}
-    poisoned_=false;hang_fence_=hung;progress_retries_=0;
+    poisoned_=false;hang_fence_=completed;progress_retries_=0;
     if(guilty) {status=release(*guilty);if(status)return status;}
     /* The GPU is idle after the restart's CP init: the CPU installs the kernel table, and each replayed job switches to its own. */
     if(table_mode_) {
@@ -1094,7 +1096,7 @@ IOReturn NativeAdrenoSubmit::recover(NativeAdrenoRestart restart,void *cookie,co
     if(preemption()) {
         preempt_.restart(0);low_service_us_=low_slice_until_=0;aging_grant_=false;
         ring(0)->setCurrent(true);
-        (void)ring(1)->restartSecondary(hung);
+        (void)ring(1)->restartSecondary(completed);
         ring(1)->setCurrent(false);
         for(unsigned i=0;i<ring_count_;++i) {
             ring(i)->tableInstalled(vm_->ttbr0());
@@ -1103,7 +1105,7 @@ IOReturn NativeAdrenoSubmit::recover(NativeAdrenoRestart restart,void *cookie,co
     }
     uint32_t nop=0;
     if(AdrenoPM4Type7(0x10,0,&nop)!=AdrenoPM4Success) {native_adreno_recover_trace[0]=4;return poison();}   /* CP_NOP */
-    for(uint32_t next=hung+1;next && next<=last;++next) {
+    for(uint32_t next=completed+1;next && next<=last;++next) {
         Job *job=find(next);
         NativeAdrenoVm *vm=job && job->vm?job->vm:vm_;
         const bool run=job && !vm->unusable() && job->word_count;

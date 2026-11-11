@@ -475,6 +475,11 @@ int main()
         auto restart=[](void *,NativeAdrenoRing *ring,uint32_t completed)->IOReturn {return ring->restart(completed);};
         CHECK(p.submit.recover(restart,nullptr,&ringclock,&result)==kIOReturnSuccess);
         CHECK(!result.guilty && p.submit.lastRecoveryStranded() && p.submit.outstanding()==1);
+        CHECK(result.replayed==1 && p.ring.lastSubmitted()==high_fence);
+        CHECK(fencemem[1]==high_fence-1 && p.submit.fencePending(high_fence));
+        CHECK(p.submit.retireCompleted()==0 && p.submit.outstanding()==1);
+        fencemem[1]=high_fence;
+        CHECK(p.submit.retireCompleted()==0 && p.submit.outstanding()==0);
         std::puts("PASS a first-ring job behind a switch the CP never finished is replayed, with no job blamed");
     }
     /* The driver's own synchronized buffers at a submission: not cleaned, and audited by the first 8 submissions and every 1024th. A
