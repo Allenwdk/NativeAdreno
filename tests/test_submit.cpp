@@ -112,6 +112,32 @@ extern "C" {extern volatile uint32_t native_adreno_submit_ibs[4],native_adreno_d
     extern volatile uint64_t native_adreno_submit_us[8];}
 int main()
 {
+    /* A full ring leaves a requested table pending while hardware still uses the old one. Closing the old VM must leave it. */
+    {
+        Path p;CHECK(exposed(p)==kIOReturnSuccess);
+        NativeAdrenoVm process;
+        NativeAdrenoTablePages process_tables;
+        ArmSmmu4KLiveArena arena;
+        ArmSmmu4KLiveState state{};
+        ArmSmmu4KLiveVisibility visibility;
+        CHECK(NativeAdrenoPrepareSmmuMemory(&process_tables,32,40,0x800000,65536,0,16,&arena,&state,&visibility)==0);
+        ArmSmmu4KContextConfig process_context=context;
+        process_context.lower=&arena.config;process_context.lower_tables=&state.tables;
+        process_context.asid=16;process_context.ttbr0_switched=1;
+        state.detached=1;state.context_offset=CB;
+        NativeAdrenoVmRegion lower={&process_tables,&arena,&state};
+        CHECK(process.attach(&smmuio,&process_context,&streams,&lower,nullptr,32,1000)==0);
+        uint64_t installed=process.ttbr0();
+        auto write=[](void *cookie,uint64_t ttbr)->IOReturn {*static_cast<uint64_t *>(cookie)=ttbr;return 0;};
+        CHECK(p.submit.setTableSwitching(2,write,&installed)==0);
+        p.ring.tableInstalled(process.ttbr0());
+        p.ring.useTable(p.vm.ttbr0());
+        CHECK(p.ring.tablePending() && installed==process.ttbr0());
+        CHECK(p.submit.forgetVm(&process,&ringclock,1000)==0);
+        CHECK(installed==p.vm.ttbr0() && !p.ring.tablePending());
+        CHECK(process.detach()==0 && process_tables.release()==0);
+        std::puts("PASS a pending table change cannot hide a closing VM from the idle TTBR0 reset");
+    }
     /* One validated indirect-buffer submission with exact ring bytes. */
     {
         Path p;CHECK(exposed(p)==kIOReturnSuccess);

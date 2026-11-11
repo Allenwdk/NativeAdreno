@@ -220,7 +220,12 @@ IOReturn NativeAdrenoSubmit::forgetVm(NativeAdrenoVm *vm,const NativeAdrenoRingC
     IOReturn status=waitAll(clock,timeout_us);
     if(status)return status;
     bool used=table_vm_==vm;
-    for(unsigned i=0;i<ring_count_;++i)used=used || ring(i)->table()==vm->ttbr0();
+    for(unsigned i=0;i<ring_count_;++i) {
+        const NativeAdrenoRing *r=ring(i);
+        /* useTable records the next table before the ring has space. If that submit was refused, the CP and the saved ring
+         * may still point to the previous table even after all accepted work retires. Install the kernel table before freeing it. */
+        used=used || r->table()==vm->ttbr0() || (table_mode_==2 && r->tablePending());
+    }
     if(!used)return kIOReturnSuccess;
     /* The GPU is idle and every queued switch has run: the CPU puts the default table back. */
     status=write_table_?write_table_(table_cookie_,vm_->ttbr0()):kIOReturnNotReady;
