@@ -92,20 +92,20 @@ struct PhaseClock {
  * this address space's tables, so the operation goes on; taking the address space out of use here failed whichever process
  * mapped or attached next (seven of them in one run, the render server among them). Counted with the status word. */
 extern "C" {volatile uint32_t native_adreno_global_fault[4];}
-ArmSmmu4KStatus NativeAdrenoVm::notOurFault(ArmSmmu4KStatus status,uint32_t word)
+ArmSmmu4KStatus NativeAdrenoVm::notOurFault(ArmSmmu4KStatus status,const ArmSmmu4KStreamResult &routes)
 {
     if(status!=ArmSmmu4KFault)return status;
-    native_adreno_global_fault[0]=native_adreno_global_fault[0]+1;native_adreno_global_fault[1]=word;
+    native_adreno_global_fault[0]=native_adreno_global_fault[0]+1;native_adreno_global_fault[1]=routes.global_fault;
     return ArmSmmu4KSuccess;
 }
 ArmSmmu4KStatus NativeAdrenoVm::observe() const
 {
     ArmSmmu4KStreamResult routes;
-    ArmSmmu4KStatus status=notOurFault(ArmSmmu4KObserveStreams(&io_,streams_,context_,&routes),routes.global_fault);if(status)return status;
+    ArmSmmu4KStatus status=notOurFault(ArmSmmu4KObserveStreams(&io_,streams_,context_,&routes),routes);if(status)return status;
     ArmSmmu4KLiveRegion lower=region(0),upper=region(1);ArmSmmu4KLiveResult audit;
     status=ArmSmmu4KLiveAuditContext(context_,lower.arena?&lower:nullptr,upper.arena?&upper:nullptr,&audit);
     if(status)return status;
-    return notOurFault(ArmSmmu4KObserveStreams(&io_,streams_,context_,&routes),routes.global_fault);
+    return notOurFault(ArmSmmu4KObserveStreams(&io_,streams_,context_,&routes),routes);
 }
 /* Global policy, the context image and the owned routes only. The scan of every other slot for a conflicting route read each
  * SMR/S2CR of the SMMU twice per map and unmap (int-152: 0.75 ms a pass, 1.3 s of the 3.2 s of 807 maps); observe(), which
@@ -124,7 +124,7 @@ ArmSmmu4KStatus NativeAdrenoVm::observeCheap()
     if(++since_audit_>=64) {
         since_audit_=0;
         ArmSmmu4KStreamResult routes;
-        return notOurFault(ArmSmmu4KObserveStreams(&io_,streams_,context_,&routes),routes.global_fault);
+        return notOurFault(ArmSmmu4KObserveStreams(&io_,streams_,context_,&routes),routes);
     }
     return ArmSmmu4KSuccess;
 }
