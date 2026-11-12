@@ -69,3 +69,19 @@ extern "C" uint32_t native_gpu_trace_snapshot(void *out,uint32_t bytes)
         if(gpuTrace.read(n,records+header->count))++header->count;
     return sizeof(*header)+header->count*sizeof(*records);
 }
+extern "C" uint32_t native_gpu_trace_since(uint64_t *cursor,void *out,uint32_t bytes,uint64_t *lost)
+{
+    if(!native_gpu_trace_enabled() || !cursor || !out || !lost || bytes<sizeof(NativeGpuTraceRecord))return 0;
+    auto *rows=static_cast<NativeGpuTraceRecord *>(out);
+    const uint32_t room=bytes/sizeof(*rows);
+    const uint64_t end=__atomic_load_n(&gpuTrace.issued,__ATOMIC_ACQUIRE);
+    const uint64_t oldest=end>gpuTrace.capacity?end-gpuTrace.capacity+1:1;
+    uint64_t first=*cursor+1;
+    if(first<oldest){*lost+=oldest-first;first=oldest;}
+    uint32_t count=0;
+    for(uint64_t seq=first;seq<=end && count<room;++seq) {
+        if(gpuTrace.read(seq,&rows[count]))++count;else ++*lost;
+        *cursor=seq;
+    }
+    return count*sizeof(*rows);
+}

@@ -93,3 +93,7 @@ mailbox sleep and owner/view counters follow upstream. Build and hardware result
 are recorded separately in the workspace's CPU/GPU synchronization report.
 
 When a failed ring switch strands work that never executed, recovery resets the completion fence to the predecessor of the oldest outstanding job and replays that job. A task blamed for an actual execution hang follows the existing skip policy. The submission regression checks the emitted replay and keeps the stranded job pending until its fence completes.
+
+## Continuous diagnostic readers
+
+`native_gpu_trace_since` copies a bounded batch using an independent sequence cursor and nonblocking slot reads. It counts overwritten and busy records, leaves the ordinary snapshot unchanged, and performs no allocation, device I/O or GPU lock acquisition. Uke uses it from its independent FUA flight-journal writer. This is a recording interface; rendering and recovery policy are unchanged.

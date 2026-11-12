@@ -35,6 +35,12 @@ int main() {
     auto *head=(NativeGpuTraceHeader *)output.data();auto *rows=(NativeGpuTraceRecord *)(head+1);
     bool build=false;for(unsigned i=0;i<head->count;++i)build|=rows[i].event==GpuTraceBuild && rows[i].value[0]==1234;
     assert(build);
+    uint64_t cursor=0,lost=0;NativeGpuTraceRecord recent[7]{};
+    unsigned recentBytes=native_gpu_trace_since(&cursor,recent,sizeof recent,&lost);
+    assert(recentBytes==sizeof recent && lost>0 && cursor==recent[6].sequence);
+    const uint64_t retainedCursor=cursor;
+    recentBytes=native_gpu_trace_since(&cursor,recent,sizeof recent,&lost);
+    assert(recentBytes==sizeof recent && cursor>retainedCursor);
     auto issued=gpuTrace.issued;
     uint64_t noise[3]={123,53,0};
     for(uint32_t event:{12u,13u,14u,15u,38u,39u,43u,61u,62u,64u,68u})native_gpu_trace_record(event,61,noise,3);

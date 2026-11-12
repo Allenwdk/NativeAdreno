@@ -43,6 +43,7 @@ extern "C" {
 int native_gpu_trace_enabled(void) NATIVE_GPU_TRACE_LINK;
 void native_gpu_trace_record(uint32_t event,uint32_t pid,const uint64_t *values,uint32_t count) NATIVE_GPU_TRACE_LINK;
 uint32_t native_gpu_trace_snapshot(void *out,uint32_t bytes);
+uint32_t native_gpu_trace_since(uint64_t *cursor,void *out,uint32_t bytes,uint64_t *lost);
 #ifdef __cplusplus
 }
 template<typename... T> static inline void gpuTraceEvent(uint32_t event,uint32_t pid,T... args) {
