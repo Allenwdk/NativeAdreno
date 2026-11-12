@@ -374,7 +374,7 @@ void NativeAdrenoSubmit::driveSwitch(const NativeAdrenoRingClock *clock)
     if(preempt_.inFlight()) {
         if(!completeSwitch()) {
             /* The CP never finished a switch: no more are tried (the restart in recover() brings the CP back). */
-            if(preempt_.timedOut(PreemptSwitchTimeoutUs)) {
+            if(!preempt_dead_ && preempt_.timedOut(PreemptSwitchTimeoutUs)) {
                 uint32_t progress[6]={};
                 (void)ring(0)->progressState(progress);
                 {
@@ -383,7 +383,7 @@ void NativeAdrenoSubmit::driveSwitch(const NativeAdrenoRingClock *clock)
                     const uint32_t n=native_adreno_switch_timeouts;
                     if(n<2) {
                         uint32_t words[NativeAdrenoRingStallWords]={};
-                        (void)ring(0)->stallState(words);
+                        (void)ring(0)->diagnosticState(words);
                         volatile uint32_t *row=native_adreno_switch_timeout[n];
                         for(uint32_t i=0;i<NativeAdrenoRingStallWords && i<24;++i)row[i]=words[i];
                         /* and CP_CONTEXT_SWITCH_CNTL as it reads now (bit 0 set: the CP still says the switch runs), with the ring the

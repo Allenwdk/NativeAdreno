@@ -12,6 +12,7 @@ extern "C" {
 extern volatile uint32_t native_adreno_stall_hang;
 extern volatile uint32_t native_adreno_stall[24];
 extern volatile uint32_t native_adreno_stall_fault[32];
+extern volatile uint32_t native_adreno_switch_timeouts;
 }
 IOReturn NativeAdrenoQueryCpu4K(NativeAdrenoCpuState *out)
 {CHECK(out);*out={};return kIOReturnSuccess;}
@@ -46,6 +47,7 @@ struct CpPeer {
     std::vector<uint32_t> regs;
     std::vector<uint32_t> writes;
     unsigned publish=0,acquire=0,barriers=0,fail_publish=0,fail_acquire=0,fail_barrier=0;
+    uint32_t fail_read_reg=UINT32_MAX;
     CpPeer():regs(0x10000,0){}
 };
 static CpPeer cp;
@@ -53,7 +55,7 @@ static uint64_t clock_us=0;
 static int cwrite(void *c,uint32_t reg,uint32_t v)
 {CHECK(c==&cp && reg<cp.regs.size());cp.regs[reg]=v;cp.writes.push_back(reg);return 0;}
 static int cread(void *c,uint32_t reg,uint32_t *v)
-{CHECK(c==&cp && v && reg<cp.regs.size());*v=cp.regs[reg];return 0;}
+{CHECK(c==&cp && v && reg<cp.regs.size());if(reg==cp.fail_read_reg)return 1;*v=cp.regs[reg];return 0;}
 static int cbarrier(void *c){CHECK(c==&cp);++cp.barriers;return cp.barriers==cp.fail_barrier;}
 static int cpublish(void *c,const volatile uint32_t *w,size_t bytes)
 {CHECK(c==&cp && w && (bytes==32768 || bytes==4096));++cp.publish;return cp.publish==cp.fail_publish;}
@@ -522,7 +524,13 @@ int main()
         p.submit.nextPriority(stranded_ring==0?0:1);
         CHECK(p.submit.submit(&p.vm,&buffer,1,8,&high_fence,&ringclock)==0);
         CHECK(cp.regs[0x08a0]&1);
+        const uint32_t timeouts_before=native_adreno_switch_timeouts;
+        cp.fail_read_reg=0x0211;  /* A diagnostic read must not poison the ring. */
         clock_us+=1100000;CHECK(p.submit.retireCompleted()==0);
+        CHECK(!p.ring.poisoned());
+        cp.fail_read_reg=UINT32_MAX;
+        CHECK(p.submit.retireCompleted()==0 && p.submit.retireCompleted()==0);
+        CHECK(native_adreno_switch_timeouts==timeouts_before+1);
         bool hung=false;
         for(unsigned i=0;i<4 && !hung;++i) {clock_us+=1000;CHECK(p.submit.hangCheck(&hung)==kIOReturnSuccess);}
         CHECK(hung && p.submit.deadReason()==2);
