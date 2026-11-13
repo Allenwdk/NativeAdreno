@@ -113,8 +113,9 @@ extern "C" {NativeAdrenoCallRec *native_adreno_call_ring;volatile uint32_t nativ
 enum {LockWaited,LockHeld,LockSince,LockClockWords};
 static void lockTimed(uint64_t *clock);
 static void unlockTimed(uint64_t *clock);
-/* A large BoAlloc's phases for the boot export (kernel.boalloc.bin, the board fills it with the caller's user stack): microseconds waiting
- * for the lock before the client's limit was read, making the descriptor, wiring its pages, cleaning them, waiting for the lock again,
+/* A large BoAlloc's phases for the boot export (kernel.boalloc.bin, the board fills it with the caller's user stack): microseconds up to the preliminary
+ * client limit check (including any lock wait on the fallback path), making the descriptor, wiring its pages, cleaning them,
+ * waiting for the dispatch lock,
  * the allocation under the lock, and giving back pages it did not take. flags: 1 write-combined, 2 the prepared pages were taken, 4 they
  * were cleaned outside the lock, 8 prepared at all, 16 the pages are pool pages (their taking and zero fill is the time of making the
  * descriptor; nothing is wired or cleaned). spans: the BO's physical runs. Only BOs of 256 KiB and more, once the board sets the
@@ -464,6 +465,10 @@ class AGXDeviceUserClient : public IOUserClient {
     bool handoffOnly_=false;
     bool kernel_=false;
     NativeAdrenoUserClient *core_=nullptr;   /* own core; deleted in free(), so a call that raced the close sees live_ false, never freed memory */
+    // Written once at mount and published by live_. Close can reset the core's
+    // scope, so preflight reads these copies without accessing the core.
+    uint64_t preflightBoLimit_=0;
+    unsigned preflightOutputBits_=0;
     NativeAdrenoProcessVm *space_=nullptr;   /* a user connection's own address space */
     unsigned row_=4;
     int32_t pid_=0;   /* the process that opened it, for the views' table */
@@ -537,12 +542,11 @@ NativeAdrenoPreparedAlloc *AGXDeviceUserClient::prepareAllocation(uint32_t selec
     NativeAdrenoAbiBoAlloc request{};memcpy(&request,input,sizeof(request));
     if(request.contiguous || !request.bytes || (request.bytes&4095))return nullptr;
     const uint64_t began=mach_absolute_time();
-    IOLockLock(g.lock);const uint64_t limit=live_?core_->boLimit():0;const unsigned bits=live_?core_->outputBits():0;IOLockUnlock(g.lock);
-    if(request.bytes>limit)return nullptr;
+    if(!__atomic_load_n(&live_,__ATOMIC_ACQUIRE) || request.bytes>preflightBoLimit_)return nullptr;
     auto *call=IONew(NativeAdrenoPreparedAlloc,1);if(!call)return nullptr;
     *call=NativeAdrenoPreparedAlloc{};
     call->connection=this;call->request=request;call->began=began;call->limited=mach_absolute_time();
-    (void)NativeAdrenoMemory::prepareSystem((size_t)request.bytes,NativeAdrenoUserClient::systemWriteCombined(),&call->pages,bits);
+    (void)NativeAdrenoMemory::prepareSystem((size_t)request.bytes,NativeAdrenoUserClient::systemWriteCombined(),&call->pages,preflightOutputBits_);
     call->prepared=mach_absolute_time();return call;
 }
 extern "C" void *native_adreno_prepare_external(IOUserClient *client,uint32_t selector,const IOExternalMethodArguments *args)
@@ -646,6 +650,8 @@ bool AGXDeviceUserClient::mount(bool kernel)
             for(unsigned i=1;!server && row==4 && i<4;++i)if(!g.rows[i])row=i;
             if(row<4)g.rows[row]=true;
             core->setStatsSlot(row);
+            preflightBoLimit_=core->boLimit();
+            preflightOutputBits_=core->outputBits();
             core_=core;core=nullptr;space_=space;space=nullptr;row_=row;kernel_=kernel;
             __atomic_store_n(&live_,true,__ATOMIC_RELEASE);ok=true;
             if(kernel)g.kernel_client=true;

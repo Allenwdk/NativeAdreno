@@ -16,6 +16,10 @@ A waiter sleeps until the completion pass finds its fence written on the ring th
 
 The GPU maps its own memory non-cacheable, so it sees what DRAM holds. User BOs are write-combined for the CPU. The GPU context's eleven kernel buffers (SQE, rings, memptrs, preemption records, 8548 KiB) are declared synchronized (`NativeAdrenoMemory::declareSynchronized`): their users write them through a non-cacheable view or clean what they stored, so a map, an unmap and a submission leave them alone. The first 8 submissions and every 1024th compare the head of each buffer as a CPU cache and DRAM hold it; a dirty line ends that trust and the buffers are cleaned at every submission again. A submission, a completion and the write-combine re-assertion visit only the mappings they have work for. `gpu-maint-all=1` visits every mapping and maintains the synchronized buffers like any other memory, for a comparison. Counters: `native_adreno_maint_kind` (maintenance at submissions by kind of mapping), `native_adreno_maint_walk` (mappings visited), `native_adreno_sync_audit`, `native_adreno_sync_skips`, `native_adreno_submit_us` (a submission's time by phase). The submission log reads the first IB's words only with `diag=1`.
 
+## System BO allocation preflight
+
+The native IOUserClient preflight reads the connection's BO size limit and physical address width from immutable copies published at mount. The subsequent dispatch still checks the live client and adopts prepared pages under the driver lock. An allocation that races close returns unused prepared pages through the existing finish callback.
+
 ## Memory accounting
 
 `native_adreno_bo_owners` and `native_adreno_bo_sizes` count the system BOs by allocating process and by size. `native_adreno_import_memory` and `native_adreno_import_owners` count the imported memory the driver keeps wired, in all and by importing process. `native_adreno_view_owners` counts the BO views each process maps; the VM bills a view to the mapping task by its size.
