@@ -1137,7 +1137,7 @@ IOReturn NativeAdrenoSubmit::hangCheck(bool *hung)
     return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoSubmit::recover(NativeAdrenoRestart restart,void *cookie,const NativeAdrenoRingClock *clock,
-    NativeAdrenoRecovery *out)
+    NativeAdrenoRecovery *out,uint32_t fault_status)
 {
     if(!out)return kIOReturnBadArgument;*out={};
     if(!attached_)return kIOReturnNotReady;
@@ -1146,7 +1146,8 @@ IOReturn NativeAdrenoSubmit::recover(NativeAdrenoRestart restart,void *cookie,co
     const uint32_t last0=ring(0)->lastSubmitted(),last1=preemption()?ring(1)->lastSubmitted():0;
     const uint32_t last=(int32_t)(last1-last0)>0?last1:last0;
     uint32_t fence=0;
-    const bool stranded=stranded_;
+    const bool stranded=stranded_ && !fault_status;
+    out->fault_status=fault_status;
     stranded_=false;last_stranded_=stranded;
     if(stranded) {
         /* No job is to blame: the second ring's work never got a CP. What each ring finished retires by that ring's own fence, and the
@@ -1200,6 +1201,7 @@ IOReturn NativeAdrenoSubmit::recover(NativeAdrenoRestart restart,void *cookie,co
     recovery_info_[0]=guilty?uint32_t(guilty->ring):9;recovery_info_[1]=last0;recovery_info_[2]=last1;recovery_info_[3]=preemption()?preempt_.loaded():0;
     /* A stranded job never ran. Keep its predecessor as the completed fence so the job itself is replayed. */
     const uint32_t completed=stranded?fence:hung;
+    out->completed=completed;
     IOReturn status=restart(cookie,ring(0),completed);
     out->status=status;
     if(status) {native_adreno_recover_trace[0]=2;native_adreno_recover_trace[1]=uint32_t(status);return poison();}

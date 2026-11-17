@@ -500,7 +500,7 @@ int main()
         CHECK(p.submit.retireCompleted()==0 && p.submit.outstanding()==0);
         std::puts("PASS a pausing wait drives the ring switch for a low-ring job");
     }
-    for(unsigned stranded_ring=0;stranded_ring<2;++stranded_ring) {
+    for(unsigned stranded_ring=0;stranded_ring<2;++stranded_ring) for(bool faulted:{false,true}) {
         /* A switch the CP never finishes leaves the destination's oldest job unexecuted. Check both switch directions. */
         Path p;CHECK(exposed(p)==kIOReturnSuccess);NativeAdrenoRing low;
         static uint32_t lowfence[1024];std::memset(lowfence,0,sizeof(lowfence));
@@ -536,9 +536,14 @@ int main()
         CHECK(hung && p.submit.deadReason()==2);
         NativeAdrenoRecovery result{};
         auto restart=[](void *,NativeAdrenoRing *ring,uint32_t completed)->IOReturn {return ring->restart(completed);};
-        CHECK(p.submit.recover(restart,nullptr,&ringclock,&result)==kIOReturnSuccess);
+        CHECK(p.submit.recover(restart,nullptr,&ringclock,&result,faulted?0x80000002u:0)==kIOReturnSuccess);
+        if(faulted) {
+            CHECK(result.guilty==&p.vm && !p.submit.lastRecoveryStranded() && !result.replayed &&
+                result.completed==high_fence && p.submit.outstanding()==0 && p.vm.hangs()==1);
+            continue;
+        }
         CHECK(!result.guilty && p.submit.lastRecoveryStranded() && p.submit.outstanding()==1);
-        CHECK(result.replayed==1 && p.ring.lastSubmitted()==high_fence);
+        CHECK(result.completed==high_fence-1 && result.replayed==1 && p.ring.lastSubmitted()==high_fence);
         CHECK(fencemem[1]==high_fence-1 && p.submit.fencePending(high_fence));
         CHECK(p.submit.retireCompleted()==0 && p.submit.outstanding()==1);
         fencemem[1]=high_fence;

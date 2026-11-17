@@ -20,7 +20,7 @@ enum {
     GpuTraceDisplayLatch=23, GpuTraceTurnipPass=36, GpuTraceTurnipGmemSide=37, GpuTraceTurnipAttachment=44,
     GpuTraceThread=63, GpuTraceProblem=65,
     GpuTracePerfInterval=66, GpuTracePerfValuesLow=67, GpuTracePerfValuesHigh=68,
-    GpuTracePerfShaderWaits=69
+    GpuTracePerfShaderWaits=69, GpuTraceRecovery=70
 };
 struct NativeGpuTraceRecord {
     uint64_t sequence,us;
