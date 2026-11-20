@@ -451,6 +451,14 @@ int main()
         /* A waiter's check is its own ring's: the high ring's finished fence is not pending while the scanout's prefix still waits for
          * the low ring's older one. Neither an unknown fence nor fence 0 is pending (wait() answers those). */
         CHECK(p.submit.fencePending(first) && !p.submit.fencePending(second) && !p.submit.fencePending(second+1) && !p.submit.fencePending(0));
+        uint32_t exactRing=2;
+        bool exactComplete=false;
+        CHECK(p.submit.scanoutFenceRing(second,exactRing) && exactRing==0);
+        CHECK(p.submit.scanoutFenceProgress(second,exactRing,exactComplete) && exactComplete);
+        CHECK(p.submit.scanoutFenceRing(first,exactRing) && exactRing==1);
+        CHECK(p.submit.scanoutFenceProgress(first,exactRing,exactComplete) && !exactComplete);
+        CHECK(!p.submit.scanoutFenceProgress(second+1,0,exactComplete));
+        CHECK(!p.submit.scanoutFenceProgress(first,2,exactComplete));
         p.submit.nextPriority(0);uint32_t running=0;CHECK(p.submit.submit(&p.vm,&buffer,1,8,&running,&ringclock)==0);
         cp.regs[0x08a0]=0x340;(void)p.submit.preemptIrq();
         CHECK(p.submit.fencePending(running) && p.submit.fencePending(first));
@@ -463,6 +471,48 @@ int main()
         CHECK(p.submit.fenceProgress(&issued,&retired) && issued==second && retired==second);
         CHECK(p.submit.wait(first,&ringclock,0)==0 && p.submit.observeFence(first,nullptr,0)==0);
         CHECK(p.submit.wait(second+1,&ringclock,0)==kIOReturnBadArgument);
+        const auto switchComplete=[&] {
+            cp.regs[0x08a0]=0x340;
+            CHECK(p.submit.preemptIrq());
+        };
+        const auto queueWork=[&](unsigned priority,uint64_t queue) {
+            uint32_t fence=0;
+            p.submit.nextPriority(priority);
+            CHECK(p.submit.submit(&p.vm,&buffer,1,queue,&fence,&ringclock)==0);
+            return fence;
+        };
+        for(bool early:{true,false}) {
+            clock_us+=4000;
+            const uint32_t highFirst=queueWork(0,8);
+            if(cp.regs[0x08a0]==0x341)switchComplete();
+            const uint32_t blocker=queueWork(1,7);
+            const uint32_t target=queueWork(0,8);
+            const uint32_t newer=queueWork(0,8);
+            fencemem[1]=highFirst;
+            CHECK(p.submit.retireCompleted()==0);
+            CHECK(p.submit.fenceProgress(&issued,&retired) && retired==blocker-1);
+            CHECK(!p.submit.boostScanoutFence(target,retired) && cp.regs[0x08a0]==0x340);
+            fencemem[1]=target;
+            CHECK(p.submit.retireCompleted()==0);
+            CHECK(p.submit.boostScanoutFence(target,retired) && cp.regs[0x08a0]==0x341);
+            CHECK(p.submit.fenceProgress(&issued,&retired) && issued==newer && retired==blocker-1);
+            CHECK(!p.submit.boostScanoutFence(target,retired)); // A switch is already in flight.
+            switchComplete();
+            const uint32_t lowLater=queueWork(1,7);
+            if(early)lowfence[1]=blocker;
+            else clock_us+=2001;
+            CHECK(p.submit.retireCompleted()==0 && cp.regs[0x08a0]==0x341);
+            switchComplete();
+            CHECK(p.submit.fenceProgress(&issued,&retired));
+            CHECK(retired==(early?target:blocker-1));
+            CHECK(!p.submit.boostScanoutFence(target,retired) && cp.regs[0x08a0]==0x340);
+            fencemem[1]=newer;
+            CHECK(p.submit.retireCompleted()==0 && cp.regs[0x08a0]==0x341);
+            switchComplete();
+            lowfence[1]=lowLater;
+            CHECK(p.submit.retireCompleted()==0 && p.submit.outstanding()==0);
+        }
+        std::puts("PASS scanout boosts only a blocking low-ring prefix, preserves completion, ends early and bounds long jobs");
         CHECK(p.submit.setTableSwitching(1,write,nullptr)==0);p.submit.nextPriority(2);
         CHECK(p.submit.submit(&p.vm,&buffer,1,7,&second,&ringclock)==0 && p.ring.lastSubmitted()==second);
         fencemem[1]=second;CHECK(p.submit.retireCompleted()==0);

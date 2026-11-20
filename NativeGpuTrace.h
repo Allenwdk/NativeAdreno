@@ -22,6 +22,14 @@ enum {
     GpuTracePerfInterval=66, GpuTracePerfValuesLow=67, GpuTracePerfValuesHigh=68,
     GpuTracePerfShaderWaits=69, GpuTraceRecovery=70
 };
+// Scanout handoff command: surface, command generation, native fence,
+// format, width, height. The kernel supplies provenance and ring identity.
+enum {GpuTraceScanoutHandoff=71, GpuTraceScanoutReady=72};
+struct NativeGpuScanoutFence {
+    uint64_t faults, suspends;
+    uint32_t fence, ring;
+    uint64_t connection;
+};
 struct NativeGpuTraceRecord {
     uint64_t sequence,us;
     uint32_t event,pid;

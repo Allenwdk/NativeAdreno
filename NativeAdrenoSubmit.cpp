@@ -366,7 +366,7 @@ const NativeAdrenoSubmit::Job *NativeAdrenoSubmit::pendingOn(unsigned index)
 }
 /* Switch by requested priority. Queue FIFO is preserved at submission; explicit cross-queue waits are resolved by the client.
  * IB handles describe command storage, not the resources it accesses, so they cannot prove dependencies. */
-void NativeAdrenoSubmit::driveSwitch(const NativeAdrenoRingClock *clock)
+void NativeAdrenoSubmit::driveSwitch(const NativeAdrenoRingClock *clock,const uint32_t *scanoutTarget)
 {
     (void)clock;
     if(!preemption())return;
@@ -402,7 +402,10 @@ void NativeAdrenoSubmit::driveSwitch(const NativeAdrenoRingClock *clock)
     if(preempt_dead_)return;
     const uint32_t loaded=preempt_.loaded();
     const uint64_t now=clock_now_?clock_now_(clock_cookie_):0;
-    if(loaded==1 && now && now<low_slice_until_ && pendingOn(1))return;
+    if(loaded==1 && now && now<low_slice_until_) {
+        const Job *const low=pendingOn(1);
+        if(low && (!scanout_slice_ || int32_t(low->fence-scanout_target_)<=0))return;
+    }
     /* Ring 0 is the high ring: while it has work the CP does not leave it for the low ring, and it takes the CP back from the low ring as
      * soon as it has some. The low ring's work still gets the GPU when the high ring is idle, and after it has waited PreemptAgingUs. */
     const Job *const high=pendingOn(0);
@@ -411,9 +414,17 @@ void NativeAdrenoSubmit::driveSwitch(const NativeAdrenoRingClock *clock)
         /* The oldest job waiting on `i` (one the ring's CP has not finished) and whether its buffers are clear of the running ring's. */
         const Job *const first=pendingOn(i);
         if(!first)continue;
+        bool scanout=false;
         if(i!=0 && high) {
             const uint64_t since=first->submit_us>low_service_us_?first->submit_us:low_service_us_;
-            if(!(now && since && now-since>PreemptAgingUs))continue;
+            const bool aged=now && since && now-since>PreemptAgingUs;
+            // Let an older low-ring job finish once the high ring has no work
+            // required by the display snapshot. Later high work can resume
+            // once this prefix is complete or the existing low slice expires.
+            scanout=!aged && scanoutTarget && now && int32_t(first->fence-*scanoutTarget)<=0 &&
+                int32_t(high->fence-*scanoutTarget)>0 && (!scanout_boost_us_ ||
+                (first->fence!=scanout_blocker_ && now-scanout_boost_us_>=PreemptAgingSliceUs));
+            if(!aged && !scanout)continue;
         }
         /* The incoming ring's preemption record keeps what it was given at setup and what the CP saved into it when it switched the
          * ring out (read pointer, info, errno); only the write pointer the CP resumes at is given again before every switch. */
@@ -424,7 +435,14 @@ void NativeAdrenoSubmit::driveSwitch(const NativeAdrenoRingClock *clock)
         uint64_t ttbr0=0;
         if(incoming->executedTable(&ttbr0)) {markPreemptDead(5);return;}
         (void)NativeAdrenoPreempt::writeSmmuInfo(preempt_setup_.pages.smmu_cpu[i],ttbr0,uint32_t(ttbr0>>48),0);
-        if(preempt_.trigger(i,true)) {aging_grant_=i==1 && high;ring(0)->setCurrent(false);ring(1)->setCurrent(false);return;}
+        if(preempt_.trigger(i,true)) {
+            aging_grant_=i==1 && high;
+            scanout_slice_=scanout;
+            if(scanout) {
+                scanout_boost_us_=now;scanout_blocker_=first->fence;scanout_target_=*scanoutTarget;
+            }
+            ring(0)->setCurrent(false);ring(1)->setCurrent(false);return;
+        }
         /* The trigger itself refused (a register write failed): the second ring cannot be reached, so it is given up at once and the
          * jobs already queued on it are replayed by the restart the hang check asks for. */
         preempt_.noteSkipped();
@@ -471,6 +489,16 @@ bool NativeAdrenoSubmit::fenceProgress(uint32_t *submitted,uint32_t *retired,uin
     if(rings){rings[0]=done[0];rings[1]=done[1];}
     *submitted=issued;*retired=prefix;return true;
 }
+bool NativeAdrenoSubmit::boostScanoutFence(uint32_t target,uint32_t completedPrefix)
+{
+    if(!preemption() || preempt_dead_ || preempt_.inFlight() || preempt_.loaded()!=0 ||
+       int32_t(target-completedPrefix)<=0)return false;
+    const Job *const blocker=find(completedPrefix+1);
+    if(!blocker || blocker->ring!=1 || (scanout_boost_us_ && blocker->fence==scanout_blocker_))return false;
+    const uint64_t previous=scanout_boost_us_;
+    driveSwitch(nullptr,&target);
+    return scanout_boost_us_!=previous;
+}
 bool NativeAdrenoSubmit::fencePending(uint32_t fence)
 {
     if(!attached_ || poisoned_ || !fence)return false;
@@ -481,6 +509,27 @@ bool NativeAdrenoSubmit::fencePending(uint32_t fence)
     uint32_t done=0;
     if(!r || r->poisoned() || fence>r->lastSubmitted() || r->fenceValue(&done))return false;
     return done<fence;
+}
+bool NativeAdrenoSubmit::scanoutFenceRing(uint32_t fence,uint32_t &index)
+{
+    if(!attached_ || poisoned_ || !fence)return false;
+    if(const Job *job=find(fence))index=job->ring;
+    else if(ring_count_==1)index=0;
+    else {
+        const uint32_t slot=fence&(FenceMap-1);
+        if(!fence_tag_ || fence_tag_[slot]!=fence)return false;
+        index=fence_ring_[slot];
+    }
+    return index<ring_count_ && int32_t(ring(index)->lastSubmitted()-fence)>=0;
+}
+bool NativeAdrenoSubmit::scanoutFenceProgress(uint32_t fence,uint32_t index,bool &complete)
+{
+    if(!attached_ || poisoned_ || !fence || index>=ring_count_)return false;
+    uint32_t done=0;
+    auto *r=ring(index);
+    if(r->poisoned() || int32_t(r->lastSubmitted()-fence)<0 || r->fenceValue(&done))return false;
+    complete=int32_t(done-fence)>=0;
+    return true;
 }
 IOReturn NativeAdrenoSubmit::setPreemption(NativeAdrenoRing *high,NativeAdrenoRing *low,const PreemptSetup &setup,bool on)
 {
@@ -506,7 +555,7 @@ IOReturn NativeAdrenoSubmit::setPreemption(NativeAdrenoRing *high,NativeAdrenoRi
     rings_[0]=high;rings_[1]=low;ring_count_=2;
     gpuTraceEvent(GpuTraceConfig,0,2,setup.mode,table_mode_,PreemptSwitchTimeoutUs,PreemptAgingUs,PreemptAgingSliceUs);
     high->setCurrent(true);low->setCurrent(false);
-    preempt_setup_=setup;low_service_us_=low_slice_until_=0;aging_grant_=false;
+    preempt_setup_=setup;low_service_us_=low_slice_until_=scanout_boost_us_=0;aging_grant_=scanout_slice_=false;
     const IOReturn attached_preempt=preempt_.attach(&setup.io,setup.pages,0,setup.now,setup.clock);
     if(attached_preempt) {ring_count_=1;rings_[1]=nullptr;return attached_preempt;}
     preempt_on_=true;
@@ -1218,7 +1267,7 @@ IOReturn NativeAdrenoSubmit::recover(NativeAdrenoRestart restart,void *cookie,co
     /* The restart's CP init ran on the first ring: it is the one the CP runs and every replayed job goes there, whatever ring it
      * came from (the words are ring-agnostic and their fence numbers are kept, so each waiter still finds its value). */
     if(preemption()) {
-        preempt_.restart(0);low_service_us_=low_slice_until_=0;aging_grant_=false;
+        preempt_.restart(0);low_service_us_=low_slice_until_=scanout_boost_us_=0;aging_grant_=scanout_slice_=false;
         ring(0)->setCurrent(true);
         (void)ring(1)->restartSecondary(completed);
         ring(1)->setCurrent(false);

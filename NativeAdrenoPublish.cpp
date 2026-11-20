@@ -27,6 +27,7 @@
 #include "NativeAdrenoGpuContext.h"
 #include "NativeAdrenoPool.h"
 #include "NativeGpuTrace.inc"
+#include "NativeScanoutClaims.h"
 
 extern "C" void proc_selfname(char *, int);
 /* The system's render server, the process that composes the display: backboardd on iPadOS, WindowServer on macOS. It gets the
@@ -238,7 +239,28 @@ struct Published {
      * gpu-fence-wake=0, a waiter pauses on the board's clock instead. */
     volatile bool interrupts=false;
     bool wake_by_interrupt=true;
+    bool scanout_boost=false;
+    bool exact_scanout=false;
+    unsigned scanout_clients=0;
+    IOLock *scanout_claim_lock=nullptr;
 } g;
+// The claim lock only protects the one-shot mailbox. Taking a claim drops it
+// before trying the GPU lock, so a busy driver still consumes the claim.
+static NativeScanoutClaims scanoutClaims;
+// Protected by g.lock. Record provenance before returning a submit reply.
+static NativeGpuScanoutFence scanoutSubmits[128];
+static uint32_t scanoutLatestFence;
+static uint64_t scanoutConnection;
+static bool scanoutEpochMatches(const NativeGpuScanoutFence &fence)
+{
+    return fence.faults==g.status.faults() && fence.suspends==g.status.suspends() &&
+        fence.connection==scanoutConnection;
+}
+static void resetScanoutClaims()
+{
+    IOLockLock(g.scanout_claim_lock);scanoutClaims.reset();IOLockUnlock(g.scanout_claim_lock);
+    scanoutLatestFence=0;memset(scanoutSubmits,0,sizeof(scanoutSubmits));
+}
 /* The completion pass: what msm does on every CP_CACHE_FLUSH_TS interrupt (a6xx_irq: msm_gpu_retire, then a6xx_preempt_trigger) and
  * once per hang check period for an interrupt that never came (hangcheck_handler). Finished jobs are retired, which lets go of their
  * buffers and looks at the switch between the two rings again: a ring that went idle leaves the CP to the other ring's queued work, and
@@ -466,6 +488,9 @@ class AGXDeviceUserClient : public IOUserClient {
     bool live_=false;
     bool handoffOnly_=false;
     bool kernel_=false;
+    bool scanoutProducer_=false;
+    task_t scanoutTask_=nullptr;
+    uint64_t lastScanoutCommand_=0;
     NativeAdrenoUserClient *core_=nullptr;   /* own core; deleted in free(), so a call that raced the close sees live_ false, never freed memory */
     // Written once at mount and published by live_. Close can reset the core's
     // scope, so preflight reads these copies without accessing the core.
@@ -655,6 +680,10 @@ bool AGXDeviceUserClient::mount(bool kernel)
             preflightBoLimit_=core->boLimit();
             preflightOutputBits_=core->outputBits();
             core_=core;core=nullptr;space_=space;space=nullptr;row_=row;kernel_=kernel;
+            if(server && g.exact_scanout) {
+                scanoutProducer_=true;scanoutTask_=current_task();++g.scanout_clients;++scanoutConnection;
+                resetScanoutClaims();
+            }
             __atomic_store_n(&live_,true,__ATOMIC_RELEASE);ok=true;
             if(kernel)g.kernel_client=true;
             ++g.opened;
@@ -742,6 +771,10 @@ IOReturn AGXDeviceUserClient::clientClose()
         if(!status) {
             __atomic_store_n(&live_,false,__ATOMIC_RELEASE);
             if(kernel_)g.kernel_client=false;
+            if(scanoutProducer_) {
+                scanoutProducer_=false;--g.scanout_clients;++scanoutConnection;
+                resetScanoutClaims();
+            }
             if(row_<4)g.rows[row_]=false;
             row_=4;
             ++g.closed;native_adreno_metal_diag.closes=native_adreno_metal_diag.closes+1;
@@ -1035,6 +1068,16 @@ static IOReturn runCore(AGXDeviceUserClient *connection,uint32_t method,const vo
         if(connection->live_)connection->core_->offerSystemPages(alloc?&pages:nullptr);
         if(connection->live_ && freeing)connection->core_->collectFreedPages(&freed);
         status=connection->live_?connection->core_->dispatch(method,input,input_size,output,output_size,&g.clock):kIOReturnNotReady;
+        if(method==NativeAdrenoMethodSubmit && !status && connection->scanoutProducer_ &&
+           g.scanout_clients==1 && output && output_size==sizeof(NativeAdrenoAbiSubmitReply)) {
+            const uint32_t fence=uint32_t(static_cast<const NativeAdrenoAbiSubmitReply *>(output)->fence);
+            uint32_t ring=0;
+            scanoutLatestFence=0;
+            if(g.submit->scanoutFenceRing(fence,ring)) {
+                scanoutLatestFence=fence;
+                scanoutSubmits[fence&127]={g.status.faults(),g.status.suspends(),fence,ring,scanoutConnection};
+            }
+        }
         if(connection->live_)connection->core_->offerSystemPages(nullptr);
         if(connection->live_ && freeing)connection->core_->collectFreedPages(nullptr);
         if(method==NativeAdrenoMethodBoMap && !status && connection->live_ && !connection->kernel_)
@@ -1121,6 +1164,31 @@ IOReturn AGXDeviceUserClient::runTimed(uint32_t method,const void *input,size_t 
     if(method==NativeGpuTraceMethod) {
         if(!input || input_size!=sizeof(NativeGpuTraceRecord) || output_size)return kIOReturnBadArgument;
         const auto *record=static_cast<const NativeGpuTraceRecord *>(input);
+        if(record->event==GpuTraceScanoutHandoff) {
+            IOLockLock(g.lock);
+            if(!live_ || !scanoutProducer_ || scanoutTask_!=current_task() || g.scanout_clients!=1) {
+                IOLockUnlock(g.lock);return kIOReturnNotPermitted;
+            }
+            const auto task=uint64_t(uintptr_t(current_task()));
+            const uint64_t thread=thread_tid(current_thread());
+            IOLockLock(g.scanout_claim_lock);
+            scanoutClaims.clear(task,thread);
+            const auto *v=record->value;
+            // Zero clears the previous wait's claim. A fresh offer names the
+            // last fence from this connection and the command's generation.
+            const uint32_t fence=uint32_t(v[2]);
+            const auto issued=scanoutSubmits[fence&127];
+            const bool panel=v[3]==0x42475241 && v[4]==3200 && v[5]==2136;
+            const bool dp=v[3]==0x62336138 && v[4]==3840 && v[5]==2160;
+            if(v[0] && v[0]<=UINT32_MAX && v[1]>lastScanoutCommand_ && v[2]==fence &&
+               fence && fence==scanoutLatestFence && issued.fence==fence && scanoutEpochMatches(issued) &&
+               (panel || dp)) {
+                lastScanoutCommand_=v[1];
+                scanoutClaims.put(task,thread,g.clock.now_us(g.clock.cookie),v[1],uint32_t(v[0]),
+                                  uint32_t(v[3]),uint32_t(v[4]),uint32_t(v[5]),issued);
+            }
+            IOLockUnlock(g.scanout_claim_lock);IOLockUnlock(g.lock);return kIOReturnSuccess;
+        }
         if(record->event!=GpuTraceThread && record->event!=GpuTraceProblem && record->event!=GpuTraceTurnipPass &&
            record->event!=GpuTraceTurnipGmemSide && record->event!=GpuTraceTurnipAttachment)return kIOReturnBadArgument;
         native_gpu_trace_record(record->event,proc_selfpid(),record->value,12);
@@ -1541,7 +1609,8 @@ extern "C" bool native_adreno_preempt_irq()
 /* For the display's direct scanout (NativeLegacyDisplay): the newest fence handed out and the newest one the CP has written. The compositor
  * submits a frame's swap when its command buffer is scheduled, not when the GPU finished it; a display that reads the surface itself waits
  * for the fences handed out before the swap arrived. False before the GPU is published. */
-extern "C" bool native_adreno_fences_detail(uint32_t *submitted,uint32_t *retired,uint32_t *detail)
+static bool readFences(uint32_t *submitted,uint32_t *retired,uint32_t *detail,
+    bool displayWait,const uint32_t *target)
 {
     if(detail){detail[0]=detail[1]=detail[2]=0;}
     if(!g.published || !g.submit || !submitted || !retired) {
@@ -1552,8 +1621,43 @@ extern "C" bool native_adreno_fences_detail(uint32_t *submitted,uint32_t *retire
         return false;
     }
     const bool known=g.submit->fenceProgress(submitted,retired,detail);
-    if(detail)detail[2]=known?2:3;
+    const bool boosted=known && displayWait && g.scanout_boost &&
+        g.submit->boostScanoutFence(target?*target:*submitted,*retired);
+    if(detail)detail[2]=!known?3:boosted?5:2;
     IOLockUnlock(g.lock);return known;
+}
+extern "C" bool native_adreno_scanout_fences_detail(uint32_t *submitted,uint32_t *retired,uint32_t *detail,
+    const uint32_t *target)
+{
+    return readFences(submitted,retired,detail,true,target);
+}
+extern "C" bool native_adreno_take_scanout_fence(uint32_t surface,uint32_t format,uint32_t width,uint32_t height,
+    NativeGpuScanoutFence *fence)
+{
+    if(!g.published || !g.exact_scanout || !fence)return false;
+    NativeGpuScanoutFence claim{};
+    IOLockLock(g.scanout_claim_lock);
+    const bool consumed=scanoutClaims.take(uint64_t(uintptr_t(current_task())),thread_tid(current_thread()),
+        g.clock.now_us(g.clock.cookie),surface,format,width,height,claim);
+    IOLockUnlock(g.scanout_claim_lock);
+    if(!consumed || !IOLockTryLock(g.lock))return false;
+    const bool valid=g.scanout_clients==1 && claim.fence==scanoutLatestFence && scanoutEpochMatches(claim);
+    if(valid)*fence=claim;
+    IOLockUnlock(g.lock);return valid;
+}
+// 0: invalidated, 1: pending (including a busy lock), 2: complete.
+extern "C" unsigned native_adreno_poll_scanout_fence(const NativeGpuScanoutFence *fence)
+{
+    if(!g.published || !g.exact_scanout || !fence)return 0;
+    if(!IOLockTryLock(g.lock))return 1;
+    bool complete=false;
+    const bool valid=g.scanout_clients==1 && scanoutEpochMatches(*fence) &&
+        g.submit->scanoutFenceProgress(fence->fence,fence->ring,complete);
+    IOLockUnlock(g.lock);return !valid?0:complete?2:1;
+}
+extern "C" bool native_adreno_fences_detail(uint32_t *submitted,uint32_t *retired,uint32_t *detail)
+{
+    return readFences(submitted,retired,detail,false,nullptr);
 }
 extern "C" bool native_adreno_fences(uint32_t *submitted,uint32_t *retired)
 {
@@ -1567,12 +1671,19 @@ extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *vm,NativeAdrenoSubmit 
 {
     if(g.published || !vm || !submit || !ring || !clock || !clock->now_us)return kIOReturnBadArgument;
     gpuTraceInit();
+    unsigned scanoutBoost=0;
+    PE_parse_boot_argn("scanout-boost",&scanoutBoost,sizeof(scanoutBoost));
+    g.scanout_boost=scanoutBoost==1;
+    unsigned panelSync=0;
+    PE_parse_boot_argn("panel-sync",&panelSync,sizeof(panelSync));
     g.lock=IOLockAlloc();
     NativeAdrenoGpuPublished *service=new NativeAdrenoGpuPublished;
     if(!g.lock || !service || !service->init() || !service->attach(IOService::getPlatform())) {
         if(service)service->release();
         return kIOReturnNoMemory;
     }
+    if(panelSync==2)g.scanout_claim_lock=IOLockAlloc();
+    g.exact_scanout=g.scanout_claim_lock!=nullptr;
     /* The fence waiters' wake path. Without its lock or its thread call the waiters keep the board's pause. gpu-fence-wake=0 keeps
      * that pause too, for a comparison on the same image. */
     {

@@ -142,6 +142,9 @@ private:
     enum : uint32_t {PreemptSwitchTimeoutUs=1000000,PreemptStrandedUs=2000000,PreemptAgingUs=250000,PreemptAgingSliceUs=2000};   /* switch watchdog 1 s; a ring-1 job unreached for 2 s */
     bool preempt_dead_=false,stranded_=false,aging_grant_=false;
     uint64_t low_service_us_=0,low_slice_until_=0;
+    bool scanout_slice_=false;
+    uint32_t scanout_blocker_=0,scanout_target_=0;
+    uint64_t scanout_boost_us_=0;
     uint32_t dead_reason_=0,rescues_=0;
     uint32_t dropped_jobs_=0;   /* jobs ended without retiring: their process's address space was out of use */
     void markPreemptDead(uint32_t reason);
@@ -154,7 +157,7 @@ private:
     /* The ring a job ran on (the first ring when there is one only). Everything that reads or writes that ring's registers goes
      * through it. */
     NativeAdrenoRing *ring(unsigned index=0) {return index<ring_count_?rings_[index]:ring_;}
-    void driveSwitch(const NativeAdrenoRingClock *clock);
+    void driveSwitch(const NativeAdrenoRingClock *clock,const uint32_t *scanoutTarget=nullptr);
     /* The ring's wait for wait(): held, a fence a job holds (NativeAdrenoRing::wait), otherwise an earlier one (observeFence). With
      * two rings a wait that pauses drives the switch between them after every pause. */
     NativeAdrenoRingFence waitOnRing(NativeAdrenoRing *r,bool held,uint32_t fence,const NativeAdrenoRingClock *clock,
@@ -202,6 +205,9 @@ public:
     bool preemptIrq();
     /* Global completed prefix for scanout: later completions on another ring cannot skip pending work. */
     bool fenceProgress(uint32_t *submitted,uint32_t *retired,uint32_t *rings=nullptr);
+    bool boostScanoutFence(uint32_t target,uint32_t completedPrefix);
+    bool scanoutFenceRing(uint32_t fence,uint32_t &index);
+    bool scanoutFenceProgress(uint32_t fence,uint32_t index,bool &complete);
     /* Whether the CP has still to write fence on the ring that issued it: true only for a fence a job holds (or, with one ring, one
      * that ring handed out) whose ring's fence word is below it. A fence of the other ring that is still pending does not count, unlike
      * the scanout's prefix. False for everything else (a retired or unknown fence, a poisoned object), where wait() has the answer.
